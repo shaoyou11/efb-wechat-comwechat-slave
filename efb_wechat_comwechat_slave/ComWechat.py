@@ -81,9 +81,6 @@ class ComWeChatChannel(SlaveChannel):
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
 
-        self.qr_file = None
-
-        self.qrcode_timeout = self.config.get("qrcode_timeout", 10)
         self.wxid = None
         self.base_path = self.config["base_path"] if "base_path" in self.config else self.bot.get_base_path()
         self.load()
@@ -97,12 +94,12 @@ class ComWeChatChannel(SlaveChannel):
         ))
 
         def update_contacts_wrapper(func):
-            def wrapper(*args, **kwargs):
-                if not self.friends and not self.groups:
-                    self.get_me()
-                    self.GetContactListBySql()
-                    self.GetGroupListBySql()
-                return func(*args, **kwargs)
+            def wrapper(msg):
+                if self.wxid is None:
+                    if self.confirm_login():
+                        return func(msg)
+                else:
+                    return func(msg)
             return wrapper
 
         @self.bot.on("self_msg")
@@ -389,38 +386,10 @@ class ComWeChatChannel(SlaveChannel):
             tmp_file.write(qr_code)
             tmp_file.flush()
         except:
-            print("[red]获取二维码失败[/red]", flush=True)
+            print("[red]获取二维码失败[/red]")
             tmp_file.close()
             return None
         return tmp_file
-
-    def login_prompt(self):
-        file = self.get_qrcode()
-        chat = self.user_auth_chat
-        author = self.user_auth_chat.other
-        msg = Message(
-            type=MsgType.Text,
-            uid=MessageID(str(int(time.time()))),
-        )
-
-        if not file:
-            is_login = self.is_login()
-            if is_login:
-                msg.text = "登录成功"
-            else:
-                msg.text = "登录失败，未知错误，请使用 /extra 重新尝试登录"
-        else:
-            msg.commands = MessageCommands([
-                MessageCommand(
-                    name=("Confirm"),
-                    callable_name="confirm_login",
-                ),
-            ])
-            msg.type = MsgType.Image
-            msg.path = Path(file.name)
-            msg.file = file
-            msg.mime = 'image/png'
-        self.send_efb_msgs(msg, chat=chat, author=author)
 
     def confirm_login(self):
         chat = self.user_auth_chat
@@ -430,19 +399,41 @@ class ComWeChatChannel(SlaveChannel):
             uid=MessageID(str(int(time.time()))),
         )
         if self.is_login():
-            self.get_me()
-            self.GetContactListBySql()
-            self.GetGroupListBySql()
+            self.after_login()
             msg.text = "登录成功"
         else:
-            msg.text = "登录失败，请使用重新登录"
+            msg.text = "登录失败，请重新登录"
         self.send_efb_msgs(msg, chat=chat, author=author)
+
+    def after_login(self):
+        self.get_me()
+        self.GetContactListBySql()
+        self.GetGroupListBySql()
 
     @efb_utils.extra(name="Get QR Code",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
-        self.login_prompt()
-        return "扫码成功之后，请点击 confirm 进行下一步"
+        file = self.get_qrcode()
+        chat = self.user_auth_chat
+        author = self.user_auth_chat.other
+        msg = Message(
+            type=MsgType.Text,
+            uid=MessageID(str(int(time.time()))),
+        )
+
+        if not file:
+            if self.is_login():
+                self.after_login()
+                return "登录成功"
+            else:
+                return "获取二维码失败，请稍后再试"
+        else:
+            msg.type = MsgType.Image
+            msg.path = Path(file.name)
+            msg.file = file
+            msg.mime = 'image/png'
+            self.send_efb_msgs(msg, chat=chat, author=author)
+        return "请扫描二维码登录"
 
     @efb_utils.extra(name="Force Logout",
            desc="强制退出")
@@ -617,6 +608,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 1800 == 3:
                 if getattr(coordinator, 'master', None) is not None and not self.is_login():
+                    self.wxid = None
                     self.system_msg(content)
 
     #获取全部联系人
@@ -644,13 +636,11 @@ class ComWeChatChannel(SlaveChannel):
 
         if self.wxid is None:
             if self.is_login():
-                self.get_me()
-                self.GetContactListBySql()
-                self.GetGroupListBySql()
+                self.after_login()
             else:
                 content = {
-                    "name": self.channel_name,
-                    "sender": self.channel_name,
+                    "name": self.user_auth_chat.name,
+                    "sender": self.user_auth_chat.uid,
                     "message": "尚未登录，请发送 /extra 扫码登录"
                 }
                 self.system_msg(content)
