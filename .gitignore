@@ -3,6 +3,7 @@ tset.py
 build/*
 dist/*
 *.egg-info
-test*
+.venv/
+.pytest_cache/
 __pycache__*
 task

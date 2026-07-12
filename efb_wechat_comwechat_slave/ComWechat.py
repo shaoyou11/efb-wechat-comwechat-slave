@@ -36,6 +36,7 @@ from .MsgProcess import MsgProcess, MsgWrapper
 from .Utils import download_file , load_config , load_temp_file_to_local , WC_EMOTICON_CONVERSION
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
+from .offline_notification import OfflineNotificationPolicy
 
 from rich.console import Console
 from rich import print as rprint
@@ -594,6 +595,7 @@ class ComWeChatChannel(SlaveChannel):
     # 定时任务
     def scheduled_job(self):
         count = 0
+        offline_notification = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
         content = {
             "name": self.channel_name,
             "sender": self.channel_name,
@@ -606,8 +608,9 @@ class ComWeChatChannel(SlaveChannel):
                 if self.wxid is not None:
                     self.GetGroupListBySql()
                     self.GetContactListBySql()
-            if count % 1800 == 3:
-                if getattr(coordinator, 'master', None) is not None and not self.is_login():
+            if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
+                logged_in = self.is_login()
+                if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     self.system_msg(content)
 
