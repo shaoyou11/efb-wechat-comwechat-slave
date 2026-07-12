@@ -37,6 +37,7 @@ from .Utils import download_file , load_config , load_temp_file_to_local , WC_EM
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
+from .login_confirmation import LoginConfirmation
 
 from rich.console import Console
 from rich import print as rprint
@@ -81,6 +82,7 @@ class ComWeChatChannel(SlaveChannel):
         self.config = load_config(efb_utils.get_config_path(self.channel_id))
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
+        self.login_confirmation = LoginConfirmation()
 
         self.wxid = None
         self.base_path = self.config["base_path"] if "base_path" in self.config else self.bot.get_base_path()
@@ -393,6 +395,12 @@ class ComWeChatChannel(SlaveChannel):
         return tmp_file
 
     def confirm_login(self):
+        return self.login_confirmation.run(
+            is_confirmed=lambda: self.wxid is not None,
+            confirm=self._confirm_login,
+        )
+
+    def _confirm_login(self):
         chat = self.user_auth_chat
         author = self.user_auth_chat.other
         msg = Message(
@@ -402,9 +410,12 @@ class ComWeChatChannel(SlaveChannel):
         if self.is_login():
             self.after_login()
             msg.text = "登录成功"
+            result = True
         else:
             msg.text = "登录失败，请重新登录"
+            result = False
         self.send_efb_msgs(msg, chat=chat, author=author)
+        return result
 
     def after_login(self):
         self.get_me()
