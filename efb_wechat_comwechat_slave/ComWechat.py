@@ -39,6 +39,7 @@ from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
+from .media_recovery import is_historical_media, media_wait_timeout
 
 from rich.console import Console
 from rich import print as rprint
@@ -84,6 +85,11 @@ class ComWeChatChannel(SlaveChannel):
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
         self.login_confirmation = LoginConfirmation()
+        self.started_at = int(time.time())
+        self.historical_media_notice_sent = False
+        self.cache = TTLCache(maxsize=200, ttl=self.time_out)
+        self.file_msg = {}
+        self.delete_file = {}
 
         self.wxid = None
         self.base_path = self.config["base_path"] if "base_path" in self.config else self.bot.get_base_path()
@@ -516,7 +522,12 @@ class ComWeChatChannel(SlaveChannel):
 
         try:
             if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
+                original_timestamp = msg.get("timestamp")
                 msg["timestamp"] = int(time.time())
+                msg["historical_media"] = (
+                    msg["type"] in ("image", "voice")
+                    and is_historical_media(original_timestamp, self.started_at)
+                )
                 msg["filepath"] = msg["filepath"].replace("\\","/")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
                 self.file_msg[msg["filepath"]] = ( msg , author , chat )
@@ -532,7 +543,12 @@ class ComWeChatChannel(SlaveChannel):
 
         if msg["type"] == "voice":
             file_path = re.search("clientmsgid=\"(.*?)\"", msg["message"]).group(1) + ".amr"
+            original_timestamp = msg.get("timestamp")
             msg["timestamp"] = int(time.time())
+            msg["historical_media"] = is_historical_media(
+                original_timestamp,
+                self.started_at,
+            )
             msg["filepath"] = f'''{self.dir}{msg["self"]}/{file_path}'''
             self.file_msg[msg["filepath"]] = ( msg , author , chat )
             return
@@ -546,15 +562,36 @@ class ComWeChatChannel(SlaveChannel):
             else:
                 for path in list(self.file_msg.keys()):
                     flag = False
+                    should_send = True
                     msg = self.file_msg[path][0]
                     author = self.file_msg[path][1]
                     chat = self.file_msg[path][2]
+                    thumb_path = ""
+                    if msg["type"] == "image" and msg.get("thumb_path"):
+                        thumb_path = msg["thumb_path"].replace("\\", "/")
+                        thumb_path = f"{self.dir}{thumb_path}"
                     if os.path.exists(path):
                         flag = True
-                    elif (int(time.time()) - msg["timestamp"]) > self.time_out:
+                    elif thumb_path and os.path.exists(thumb_path):
+                        msg["filepath"] = thumb_path
+                        flag = True
+                    elif (int(time.time()) - msg["timestamp"]) > media_wait_timeout(
+                        msg.get("historical_media", False)
+                    ):
                         msg_type = msg["type"]
-                        msg['message'] = f"[{msg_type} 下载超时,请在手机端查看]"
-                        msg["type"] = "text"
+                        if msg.get("historical_media", False):
+                            if self.historical_media_notice_sent:
+                                should_send = False
+                            else:
+                                msg["message"] = (
+                                    "[EFB 重启后检测到历史图片或语音附件已失效，"
+                                    "后续重复提示已自动省略，请在手机端查看]"
+                                )
+                                msg["type"] = "text"
+                                self.historical_media_notice_sent = True
+                        else:
+                            msg['message'] = f"[{msg_type} 下载超时,请在手机端查看]"
+                            msg["type"] = "text"
                         flag = True
                     elif msg["type"] == "voice":
                         sql = f'SELECT Buf FROM Media WHERE Reserved0 = {msg["msgid"]}'
@@ -569,7 +606,8 @@ class ComWeChatChannel(SlaveChannel):
 
                     if flag:
                         del self.file_msg[path]
-                        self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+                        if should_send:
+                            self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
 
             if len(self.delete_file):
                 for k in list(self.delete_file.keys()):

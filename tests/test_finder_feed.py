@@ -171,7 +171,7 @@ def test_finder_feed_wrapper_returns_video(monkeypatch):
     assert "当前微信版本不支持" not in message.text
 
 
-def test_finder_feed_wrapper_falls_back_to_link(monkeypatch):
+def test_finder_feed_wrapper_falls_back_to_cover_with_link(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
     requested = []
 
@@ -183,8 +183,12 @@ def test_finder_feed_wrapper_falls_back_to_link(monkeypatch):
 
     message = msg_deco.efb_finder_feed_wrapper(FINDER_XML, downloader=downloader)
 
-    assert requested == ["https://example.test/video.mp4"]
-    assert message.type == "text"
+    assert requested == [
+        "https://example.test/video.mp4",
+        "https://example.test/cover.jpg",
+    ]
+    assert message.type == "image"
+    assert message.filename == "wechat-channel.jpg"
     assert "关于三个老婆" in message.text
     assert "https://channels.weixin.qq.com/web/pages/feed?" in message.text
 

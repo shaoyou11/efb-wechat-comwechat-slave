@@ -188,9 +188,6 @@ def efb_finder_feed_wrapper(
                 error,
             )
 
-    if feed.share_url:
-        return efb_text_simple_wrapper(caption)
-
     if feed.cover_url:
         try:
             cover = downloader(feed.cover_url)
