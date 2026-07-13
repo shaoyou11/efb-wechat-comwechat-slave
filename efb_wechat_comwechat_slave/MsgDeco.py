@@ -3,6 +3,7 @@ import magic
 from lxml import etree
 from functools import partial
 from traceback import print_exc
+import logging
 import re , json
 
 from ehforwarderbot import MsgType, Chat, coordinator
@@ -12,6 +13,8 @@ from ehforwarderbot.types import MessageID
 
 from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat
+from .Utils import download_file
+from .finder_feed import parse_finder_feed
 
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
 
@@ -150,6 +153,54 @@ def efb_video_wrapper(file: IO, filename: str = None, text: str = None) -> Messa
     if text:
         efb_msg.text = text
     return efb_msg
+
+
+def efb_finder_feed_wrapper(
+    xml_text: str,
+    downloader=download_file,
+) -> Message:
+    feed = parse_finder_feed(xml_text)
+    if feed is None:
+        return efb_text_simple_wrapper("无法解析微信视频号分享")
+
+    lines = ["微信视频号分享"]
+    if feed.author:
+        lines.append(f"作者：{feed.author}")
+    if feed.description:
+        lines.append(feed.description)
+    if feed.duration_seconds is not None:
+        lines.append(f"时长：{feed.duration_seconds} 秒")
+    caption = "\n".join(lines)
+
+    if feed.video_url:
+        try:
+            video = downloader(feed.video_url)
+            return efb_video_wrapper(
+                video,
+                filename="wechat-channel.mp4",
+                text=caption,
+            )
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "微信视频号视频下载失败，尝试发送封面：%s",
+                error,
+            )
+
+    if feed.cover_url:
+        try:
+            cover = downloader(feed.cover_url)
+            return efb_image_wrapper(
+                cover,
+                filename="wechat-channel.jpg",
+                text=caption,
+            )
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "微信视频号封面下载失败，降级发送文字：%s",
+                error,
+            )
+
+    return efb_text_simple_wrapper(caption)
 
 def efb_file_wrapper(file: IO, filename: str = None, text: str = None) -> Message:
     """
@@ -438,29 +489,7 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                 vendor_specific={ "is_forwarded": True }
             )
         elif type == 51: # 视频（微信视频号分享）
-            title = xml.xpath('/msg/appmsg/title/text()')[0]
-            url = xml.xpath('/msg/appmsg/url/text()')[0]
-            if len(xml.xpath('/msg/appmsg/finderFeed/avatar/text()'))!=0:
-                imgurl = xml.xpath('/msg/appmsg/finderFeed/avatar/text()')[0].strip("<![CDATA[").strip("]]>")
-            else:
-                imgurl = None
-            if len(xml.xpath('/msg/appmsg/finderFeed/desc/text()'))!=0:
-                desc = xml.xpath('/msg/appmsg/finderFeed/desc/text()')[0]
-            else:
-                desc = None
-            result_text += f"微信视频号分享\n - - - - - - - - - - - - - - - \n"
-            attribute = LinkAttribute(
-                title=title,
-                description=  '\n' + desc,
-                url= url,
-                image= imgurl
-            )
-            efb_msg = Message(
-                attributes=attribute,
-                type=MsgType.Link,
-                text=result_text,
-                vendor_specific={ "is_mp": True }
-            )
+            return efb_finder_feed_wrapper(text)
         elif type == 57: # 引用（回复）消息
             msg = xml.xpath('/msg/appmsg/title/text()')[0]
             refer_msgType = int(xml.xpath('/msg/appmsg/refermsg/type/text()')[0]) # 被引用消息类型
