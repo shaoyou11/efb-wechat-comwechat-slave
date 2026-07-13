@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlencode
 
 from lxml import etree
 
@@ -12,6 +13,14 @@ class FinderFeed:
     cover_url: str
     duration_seconds: Optional[int]
     object_id: str
+    object_nonce_id: str
+
+    @property
+    def share_url(self) -> str:
+        if not self.object_id or not self.object_nonce_id:
+            return ""
+        query = urlencode({"oid": self.object_id, "nid": self.object_nonce_id})
+        return f"https://channels.weixin.qq.com/web/pages/feed?{query}"
 
 
 def _first_text(xml: etree._Element, *paths: str) -> str:
@@ -59,4 +68,9 @@ def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
         ),
         duration_seconds=duration_seconds,
         object_id=_first_text(feed, "objectId/text()", "object_id/text()"),
+        object_nonce_id=_first_text(
+            feed,
+            "objectNonceId/text()",
+            "object_nonce_id/text()",
+        ),
     )

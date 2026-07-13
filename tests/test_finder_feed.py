@@ -54,6 +54,11 @@ def test_parse_finder_feed_extracts_video_metadata():
     assert feed.cover_url == "https://example.test/cover.jpg"
     assert feed.duration_seconds == 29
     assert feed.object_id == "14964026784220842528"
+    assert feed.object_nonce_id == "nonce-value"
+    assert feed.share_url == (
+        "https://channels.weixin.qq.com/web/pages/feed?"
+        "oid=14964026784220842528&nid=nonce-value"
+    )
 
 
 def test_parse_finder_feed_ignores_normal_link():
@@ -166,7 +171,7 @@ def test_finder_feed_wrapper_returns_video(monkeypatch):
     assert "当前微信版本不支持" not in message.text
 
 
-def test_finder_feed_wrapper_falls_back_to_cover(monkeypatch):
+def test_finder_feed_wrapper_falls_back_to_link(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
     requested = []
 
@@ -178,13 +183,10 @@ def test_finder_feed_wrapper_falls_back_to_cover(monkeypatch):
 
     message = msg_deco.efb_finder_feed_wrapper(FINDER_XML, downloader=downloader)
 
-    assert requested == [
-        "https://example.test/video.mp4",
-        "https://example.test/cover.jpg",
-    ]
-    assert message.type == "image"
-    assert message.filename == "wechat-channel.jpg"
+    assert requested == ["https://example.test/video.mp4"]
+    assert message.type == "text"
     assert "关于三个老婆" in message.text
+    assert "https://channels.weixin.qq.com/web/pages/feed?" in message.text
 
 
 def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):

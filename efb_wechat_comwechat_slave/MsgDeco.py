@@ -170,6 +170,8 @@ def efb_finder_feed_wrapper(
         lines.append(feed.description)
     if feed.duration_seconds is not None:
         lines.append(f"时长：{feed.duration_seconds} 秒")
+    if feed.share_url:
+        lines.append(f"视频链接：{feed.share_url}")
     caption = "\n".join(lines)
 
     if feed.video_url:
@@ -182,9 +184,12 @@ def efb_finder_feed_wrapper(
             )
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "微信视频号视频下载失败，尝试发送封面：%s",
+                "微信视频号视频下载失败，发送视频链接：%s",
                 error,
             )
+
+    if feed.share_url:
+        return efb_text_simple_wrapper(caption)
 
     if feed.cover_url:
         try:
