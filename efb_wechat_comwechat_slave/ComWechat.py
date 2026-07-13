@@ -37,6 +37,7 @@ from .Utils import download_file , load_config , load_temp_file_to_local , WC_EM
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
+from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
 
 from rich.console import Console
@@ -623,6 +624,10 @@ class ComWeChatChannel(SlaveChannel):
                 logged_in = self.is_login()
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
+                    try:
+                        notify_watchdog()
+                    except Exception as error:
+                        self.logger.warning("Unable to trigger login watchdog: %s", error)
                     self.system_msg(content)
 
     #获取全部联系人
