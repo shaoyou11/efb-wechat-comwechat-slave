@@ -423,7 +423,7 @@ class ComWeChatChannel(SlaveChannel):
         self.GetContactListBySql()
         self.GetGroupListBySql()
 
-    @efb_utils.extra(name="Get QR Code",
+    @efb_utils.extra(name="重新扫码登录",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
         file = self.get_qrcode()
@@ -448,7 +448,7 @@ class ComWeChatChannel(SlaveChannel):
             self.send_efb_msgs(msg, chat=chat, author=author)
         return "请扫描二维码登录"
 
-    @efb_utils.extra(name="Force Logout",
+    @efb_utils.extra(name="强制退出微信",
            desc="强制退出")
     def force_logout(self, _: str = "") -> str:
         res = self.bot.post(44, params=EmptyJsonResponse())

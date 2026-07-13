@@ -36,11 +36,26 @@ def download_file(url: str, retry: int = 3) -> tempfile:
     while True:
         try:
             file = tempfile.NamedTemporaryFile()
-            r = requests.get(url, stream=True, timeout=10)
+            r = requests.get(
+                url,
+                stream=True,
+                timeout=30,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 Chrome/131.0 Safari/537.36 "
+                        "MicroMessenger/3.9.12"
+                    ),
+                    "Referer": "https://weixin.qq.com/",
+                },
+            )
+            r.raise_for_status()
             for chunk in r.iter_content(chunk_size=1024):
                 if chunk:
                     file.write(chunk)
                     file.flush()
+            if file.tell() == 0:
+                raise ValueError("Downloaded file is empty")
         except Exception as e:
             logging.getLogger(__name__).warning(f"Error occurred when downloading {url}. {e}")
             if count >= retry:
