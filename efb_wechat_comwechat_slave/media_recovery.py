@@ -19,3 +19,16 @@ def media_wait_timeout(historical: bool) -> int:
     if historical:
         return HISTORICAL_MEDIA_WAIT_SECONDS
     return NORMAL_MEDIA_WAIT_SECONDS
+
+
+def should_use_thumbnail(
+    full_image_exists: bool,
+    thumbnail_exists: bool,
+    elapsed_seconds: int,
+    timeout_seconds: int,
+) -> bool:
+    return (
+        not full_image_exists
+        and thumbnail_exists
+        and elapsed_seconds >= timeout_seconds
+    )

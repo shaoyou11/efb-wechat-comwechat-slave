@@ -39,7 +39,11 @@ from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
-from .media_recovery import is_historical_media, media_wait_timeout
+from .media_recovery import (
+    is_historical_media,
+    media_wait_timeout,
+    should_use_thumbnail,
+)
 
 from rich.console import Console
 from rich import print as rprint
@@ -570,14 +574,25 @@ class ComWeChatChannel(SlaveChannel):
                     if msg["type"] == "image" and msg.get("thumb_path"):
                         thumb_path = msg["thumb_path"].replace("\\", "/")
                         thumb_path = f"{self.dir}{thumb_path}"
-                    if os.path.exists(path):
+                    full_image_exists = os.path.exists(path)
+                    thumbnail_exists = bool(
+                        thumb_path and os.path.exists(thumb_path)
+                    )
+                    elapsed_seconds = int(time.time()) - msg["timestamp"]
+                    timeout_seconds = media_wait_timeout(
+                        msg.get("historical_media", False)
+                    )
+                    if full_image_exists:
                         flag = True
-                    elif thumb_path and os.path.exists(thumb_path):
+                    elif should_use_thumbnail(
+                        full_image_exists,
+                        thumbnail_exists,
+                        elapsed_seconds,
+                        timeout_seconds,
+                    ):
                         msg["filepath"] = thumb_path
                         flag = True
-                    elif (int(time.time()) - msg["timestamp"]) > media_wait_timeout(
-                        msg.get("historical_media", False)
-                    ):
+                    elif elapsed_seconds >= timeout_seconds:
                         msg_type = msg["type"]
                         if msg.get("historical_media", False):
                             if self.historical_media_notice_sent:

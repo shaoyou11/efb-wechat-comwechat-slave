@@ -25,3 +25,9 @@ def test_old_media_gets_short_recovery_window():
 def test_missing_timestamp_is_not_treated_as_history():
     assert not MODULE.is_historical_media(0, 1000)
     assert not MODULE.is_historical_media(None, 1000)
+
+
+def test_thumbnail_is_only_used_after_full_image_timeout():
+    assert not MODULE.should_use_thumbnail(True, True, 120, 120)
+    assert not MODULE.should_use_thumbnail(False, True, 1, 120)
+    assert MODULE.should_use_thumbnail(False, True, 120, 120)
