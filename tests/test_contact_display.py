@@ -17,6 +17,15 @@ def test_notifymessage_is_localized_without_lookup():
     assert calls == []
 
 
+def test_other_wechat_system_accounts_are_localized():
+    calls = []
+
+    assert resolve_contact_name("notification_messages", "notification_messages", calls.append) == "服务通知"
+    assert resolve_contact_name("tmessage", "tmessage", calls.append) == "腾讯微博"
+    assert resolve_contact_name("weibo", "weibo", calls.append) == "微博"
+    assert calls == []
+
+
 def test_technical_public_account_id_is_refreshed_from_wechat_database():
     def lookup(wxid):
         assert wxid == "gh_366bf6794a09"

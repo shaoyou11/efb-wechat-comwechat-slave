@@ -4,11 +4,14 @@ from typing import Callable, Iterable, Optional, Sequence
 
 SYSTEM_CONTACT_NAMES = {
     "notifymessage": "服务通知",
+    "notification_messages": "服务通知",
     "filehelper": "文件传输助手",
     "fmessage": "新的朋友",
     "weixin": "微信团队",
     "medianote": "语音记事本",
     "newsapp": "腾讯新闻",
+    "tmessage": "腾讯微博",
+    "weibo": "微博",
     "qqmail": "QQ邮箱提醒",
 }
 
