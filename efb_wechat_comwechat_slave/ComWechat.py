@@ -39,6 +39,7 @@ from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
+from .contact_display import resolve_contact_name, update_existing_chat_name
 from .media_recovery import (
     is_historical_media,
     media_wait_timeout,
@@ -981,20 +982,9 @@ class ComWeChatChannel(SlaveChannel):
         ...
 
     def get_name_by_wxid(self, wxid):
-        try:
-            name = self.contacts[wxid]
-            if name == "":
-                name = wxid
-        except:
-            data = self.bot.GetContactBySql(wxid = wxid)
-            if data:
-                name = data[3]
-                if name == "":
-                    name = wxid
-                else:
-                    self.contacts[wxid] = name
-            else:
-                name = wxid
+        cached_name = self.contacts.get(wxid, wxid)
+        name = resolve_contact_name(wxid, cached_name, lambda contact: self.bot.GetContactBySql(wxid=contact))
+        self.contacts[wxid] = name
         return name
 
     @staticmethod
@@ -1041,6 +1031,7 @@ class ComWeChatChannel(SlaveChannel):
         for contact in contacts:
             data = contacts[contact]
             name = (f"{data['remark']}({data['nickname']})") if data["remark"] else data["nickname"]
+            name = resolve_contact_name(contact, name, lambda wxid: self.bot.GetContactBySql(wxid=wxid))
 
             self.contacts[contact] = name
             self.nicknames[contact] = data["nickname"]
@@ -1048,6 +1039,7 @@ class ComWeChatChannel(SlaveChannel):
                 continue
 
             if "@chatroom" in contact:
+                update_existing_chat_name(self.groups, contact, name)
                 new_entity = EFBGroupChat(
                     uid=contact,
                     name=name
@@ -1059,6 +1051,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.groups.append(ChatMgr.build_efb_chat_as_group(new_entity))
                     new_chats.append(contact)
             else:
+                update_existing_chat_name(self.friends, contact, name)
                 new_entity = EFBPrivateChat(
                     uid=contact,
                     name=name
