@@ -686,6 +686,10 @@ class ComWeChatChannel(SlaveChannel):
 
     #获取全部联系人
     def get_chats(self) -> Collection['Chat']:
+        if not self.friends and not self.groups and self.is_login():
+            self.get_me()
+            self.GetContactListBySql(notify=False)
+            self.GetGroupListBySql()
         return list(self.friends) + list(self.groups)
 
     #获取联系人
@@ -1024,7 +1028,7 @@ class ComWeChatChannel(SlaveChannel):
 
     #定时更新 Start
     @non_blocking_lock_wrapper(contact_update_lock)
-    def GetContactListBySql(self):
+    def GetContactListBySql(self, notify: bool = True):
         new_chats = []
         modified_chats = []
         contacts = self.bot.GetContactListBySql()
@@ -1063,7 +1067,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.friends.append(ChatMgr.build_efb_chat_as_private(new_entity))
                     new_chats.append(contact)
 
-        if new_chats or modified_chats:
+        if notify and (new_chats or modified_chats):
             coordinator.send_status(ChatUpdates(channel=self, new_chats=new_chats, modified_chats=modified_chats))
 
     def load(self):
