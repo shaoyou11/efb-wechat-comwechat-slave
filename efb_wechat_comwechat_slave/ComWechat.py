@@ -686,10 +686,6 @@ class ComWeChatChannel(SlaveChannel):
 
     #获取全部联系人
     def get_chats(self) -> Collection['Chat']:
-        if not self.friends and not self.groups and self.is_login():
-            self.get_me()
-            self.GetContactListBySql(notify=False)
-            self.GetGroupListBySql()
         return list(self.friends) + list(self.groups)
 
     #获取联系人
