@@ -686,7 +686,7 @@ class ComWeChatChannel(SlaveChannel):
 
     #获取全部联系人
     def get_chats(self) -> Collection['Chat']:
-        return []
+        return list(self.friends) + list(self.groups)
 
     #获取联系人
     def get_chat(self, chat_uid: ChatID) -> 'Chat':
