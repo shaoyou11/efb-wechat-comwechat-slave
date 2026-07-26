@@ -1,11 +1,12 @@
 import os
 from pathlib import PurePosixPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 HISTORICAL_MEDIA_AGE_SECONDS = 10 * 60
 HISTORICAL_MEDIA_WAIT_SECONDS = 10
 NORMAL_MEDIA_WAIT_SECONDS = 120
+MEDIA_FILE_STABLE_SECONDS = 3
 WECHAT_FILES_MARKER = "/WeChat Files/"
 
 
@@ -72,3 +73,22 @@ def cdn_media_path(
         return None
 
     return os.path.join(media_root, *relative_parts)
+
+
+def observe_media_file_size(
+    current_size: int,
+    previous_size: Optional[int],
+    stable_since: Optional[float],
+    now: float,
+) -> Tuple[bool, int, float]:
+    if current_size <= 0 or current_size != previous_size:
+        return False, current_size, now
+
+    if stable_since is None:
+        return False, current_size, now
+
+    return (
+        now - stable_since >= MEDIA_FILE_STABLE_SECONDS,
+        current_size,
+        stable_since,
+    )

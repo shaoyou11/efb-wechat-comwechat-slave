@@ -70,3 +70,47 @@ def test_only_recent_images_and_videos_request_original_download():
     assert MODULE.should_request_original_media("video", 995, 1000)
     assert not MODULE.should_request_original_media("voice", 995, 1000)
     assert not MODULE.should_request_original_media("image", 100, 1000)
+
+
+def test_downloaded_media_waits_until_size_is_stable():
+    ready, size, since = MODULE.observe_media_file_size(
+        current_size=1024,
+        previous_size=None,
+        stable_since=None,
+        now=10.0,
+    )
+    assert not ready
+    assert size == 1024
+    assert since == 10.0
+
+    ready, size, since = MODULE.observe_media_file_size(
+        current_size=2048,
+        previous_size=size,
+        stable_since=since,
+        now=11.0,
+    )
+    assert not ready
+    assert size == 2048
+    assert since == 11.0
+
+    ready, size, since = MODULE.observe_media_file_size(
+        current_size=2048,
+        previous_size=size,
+        stable_since=since,
+        now=14.0,
+    )
+    assert ready
+    assert size == 2048
+    assert since == 11.0
+
+
+def test_empty_media_file_is_never_ready():
+    ready, size, since = MODULE.observe_media_file_size(
+        current_size=0,
+        previous_size=0,
+        stable_since=1.0,
+        now=20.0,
+    )
+    assert not ready
+    assert size == 0
+    assert since == 20.0

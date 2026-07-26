@@ -44,6 +44,7 @@ from .media_recovery import (
     cdn_media_path,
     is_historical_media,
     media_wait_timeout,
+    observe_media_file_size,
     should_request_original_media,
     should_use_thumbnail,
 )
@@ -543,6 +544,7 @@ class ComWeChatChannel(SlaveChannel):
                     if original_path:
                         msg["timestamp"] = int(time.time())
                         msg["historical_media"] = False
+                        msg["wait_for_stable_media"] = True
                         msg["filepath"] = original_path
                         self.file_msg[original_path] = (msg, author, chat)
                         self.logger.info(
@@ -609,6 +611,23 @@ class ComWeChatChannel(SlaveChannel):
                         thumb_path = msg["thumb_path"].replace("\\", "/")
                         thumb_path = f"{self.dir}{thumb_path}"
                     full_image_exists = os.path.exists(path)
+                    full_media_ready = full_image_exists
+                    if full_image_exists and msg.get("wait_for_stable_media"):
+                        try:
+                            (
+                                full_media_ready,
+                                observed_size,
+                                stable_since,
+                            ) = observe_media_file_size(
+                                current_size=os.path.getsize(path),
+                                previous_size=msg.get("_media_observed_size"),
+                                stable_since=msg.get("_media_stable_since"),
+                                now=time.monotonic(),
+                            )
+                            msg["_media_observed_size"] = observed_size
+                            msg["_media_stable_since"] = stable_since
+                        except OSError:
+                            full_media_ready = False
                     thumbnail_exists = bool(
                         thumb_path and os.path.exists(thumb_path)
                     )
@@ -616,7 +635,7 @@ class ComWeChatChannel(SlaveChannel):
                     timeout_seconds = media_wait_timeout(
                         msg.get("historical_media", False)
                     )
-                    if full_image_exists:
+                    if full_media_ready:
                         flag = True
                     elif should_use_thumbnail(
                         full_image_exists,
@@ -656,7 +675,12 @@ class ComWeChatChannel(SlaveChannel):
                     if flag:
                         del self.file_msg[path]
                         if should_send:
+                            msg.pop("_media_observed_size", None)
+                            msg.pop("_media_stable_since", None)
+                            msg.pop("wait_for_stable_media", None)
                             self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+
+                time.sleep(0.1)
 
             if len(self.delete_file):
                 for k in list(self.delete_file.keys()):
