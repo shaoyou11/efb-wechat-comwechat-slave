@@ -40,6 +40,7 @@ from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
 from .contact_display import resolve_contact_name, update_existing_chat_name
+from .command_validation import chatroom_member_ids, group_command_error
 from .media_recovery import (
     cdn_media_path,
     is_historical_media,
@@ -797,13 +798,28 @@ class ComWeChatChannel(SlaveChannel):
             msg.filename = os.path.basename(f.name)
 
         if msg.type in [MsgType.Text]:
+            command_error = group_command_error(msg.text, chat_uid)
+            if command_error:
+                self.system_msg({
+                    "sender": chat_uid,
+                    "message": command_error,
+                })
+                return msg
+
             if msg.text.startswith('/changename'):
                 newname = msg.text.strip('/changename ')
                 res = self.bot.SetChatroomName(chatroom_id = chat_uid , chatroom_name = newname)
             elif msg.text.startswith('/getmemberlist'):
                 memberlist = self.bot.GetChatroomMemberList(chatroom_id = chat_uid)
+                members = chatroom_member_ids(memberlist)
+                if not members:
+                    self.system_msg({
+                        "sender": chat_uid,
+                        "message": "未获取到群成员，请稍后重试。",
+                    })
+                    return msg
                 message = '群组成员包括：'
-                for wxid in memberlist['members'].split('^G'):
+                for wxid in members:
                     try:
                         name = self.contacts[wxid]
                     except:
@@ -827,21 +843,23 @@ class ComWeChatChannel(SlaveChannel):
                     message = '当前仅支持查询friends, groups, group_members, contacts'
                 self.system_msg({'sender':chat_uid, 'message':message})
             elif msg.text.startswith('/helpcomwechat'):
-                message = '''/search - 按关键字匹配好友昵称搜索联系人
+                message = '''ComWechat 会话内命令（需在具体微信会话中手动输入）：
 
-/addtogroup - 按wxid添加好友到群组
+/search - 按关键字匹配好友昵称搜索联系人
 
-/getmemberlist - 查看群组用户wxid
+/addtogroup - 按 wxid 添加好友到当前群聊（仅群聊）
 
-/at - 后面跟wxid，多个用英文,隔开，最后可用空格隔开，带内容。
+/getmemberlist - 查看当前群聊成员 wxid（仅群聊）
+
+/at - 提醒群成员（仅群聊）
 
 /sendcard - 后面格式'wxid nickname'
 
-/changename - 修改群组名称
+/changename - 修改当前群聊名称（仅群聊）
 
 /addfriend - 后面格式'wxid message'
 
-/getstaticinfo - 可获取friends, groups, contacts信息'''
+/getstaticinfo - 可获取 friends、groups、group_members、contacts 信息'''
                 self.system_msg({'sender':chat_uid, 'message':message})
             elif msg.text.startswith('/search'):
                 keyword = msg.text[8::]

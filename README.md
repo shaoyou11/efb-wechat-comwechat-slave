@@ -34,17 +34,17 @@
 
 ## 微信会话内指令
 
-以下命令需要发送到具体微信联系人或微信群会话中，不是在机器人主会话中使用：
+这些是 ComWechat 从端保留的会话内命令，不会注册到 Telegram 的全局斜杠命令菜单。需要进入 EFB 中对应的微信联系人或微信群会话后手动输入，不是在机器人主会话中使用：
 
 | 命令 | 参数与作用 |
 | --- | --- |
 | `/helpcomwechat` | 显示 ComWechat 会话内指令 |
 | `/search 关键字` | 按联系人昵称搜索并返回 wxid |
-| `/addtogroup wxid` | 将指定微信用户加入当前群聊 |
-| `/getmemberlist` | 列出当前群聊成员 wxid 与昵称 |
-| `/at wxid 消息` | 在群聊中提醒指定成员；多个 wxid 使用英文逗号分隔 |
+| `/addtogroup wxid` | 将指定微信用户加入当前群聊；仅限微信群 |
+| `/getmemberlist` | 列出当前群聊成员 wxid 与昵称；仅限微信群 |
+| `/at wxid 消息` | 在群聊中提醒指定成员；仅限微信群，多个 wxid 使用英文逗号分隔 |
 | `/sendcard wxid 昵称` | 向当前会话发送联系人名片 |
-| `/changename 新群名` | 修改当前微信群名称 |
+| `/changename 新群名` | 修改当前微信群名称；仅限微信群 |
 | `/addfriend wxid 验证消息` | 发送好友申请 |
 | `/getstaticinfo friends` | 查看好友缓存 |
 | `/getstaticinfo groups` | 查看群聊缓存 |
@@ -52,7 +52,7 @@
 | `/getstaticinfo contacts` | 查看联系人缓存 |
 | `/forward` | 回复目标微信消息后生成跨会话转发信息 |
 
-群管理指令是否成功取决于当前微信账号权限、群聊状态及 ComWechat 接口返回结果。
+群管理指令在联系人私聊中会直接提示“该命令只能在微信群会话中使用”。是否执行成功仍取决于当前微信账号权限、群聊状态及 ComWechat 接口返回结果。
 
 ## 登录与自动恢复
 
