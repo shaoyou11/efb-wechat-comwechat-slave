@@ -67,7 +67,7 @@ def test_cdn_media_path_rejects_failed_or_unsafe_result():
 
 def test_only_recent_images_and_videos_request_original_download():
     assert MODULE.should_request_original_media("image", 995, 1000)
-    assert MODULE.should_request_original_media("video", 995, 1000)
+    assert not MODULE.should_request_original_media("video", 995, 1000)
     assert not MODULE.should_request_original_media("voice", 995, 1000)
     assert not MODULE.should_request_original_media("image", 100, 1000)
 

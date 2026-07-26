@@ -545,6 +545,7 @@ class ComWeChatChannel(SlaveChannel):
                         msg["timestamp"] = int(time.time())
                         msg["historical_media"] = False
                         msg["wait_for_stable_media"] = True
+                        msg["force_send_as_file"] = msg["type"] == "image"
                         msg["filepath"] = original_path
                         self.file_msg[original_path] = (msg, author, chat)
                         self.logger.info(

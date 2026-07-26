@@ -44,7 +44,7 @@ def should_request_original_media(
     started_at: int,
 ) -> bool:
     return (
-        media_type in ("image", "video")
+        media_type == "image"
         and not is_historical_media(original_timestamp, started_at)
     )
 
