@@ -31,3 +31,42 @@ def test_thumbnail_is_only_used_after_full_image_timeout():
     assert not MODULE.should_use_thumbnail(True, True, 120, 120)
     assert not MODULE.should_use_thumbnail(False, True, 1, 120)
     assert MODULE.should_use_thumbnail(False, True, 120, 120)
+
+
+def test_cdn_media_path_maps_windows_wechat_path_to_shared_mount():
+    result = {
+        "msg": 1,
+        "path": (
+            r"C:\Users\user\My Documents\WeChat Files"
+            r"\shaoyou11\WeChatRobot\Image\123.png"
+        ),
+    }
+
+    assert MODULE.cdn_media_path(result, "/comwechat/Files") == (
+        "/comwechat/Files/shaoyou11/WeChatRobot/Image/123.png"
+    )
+
+
+def test_cdn_media_path_rejects_failed_or_unsafe_result():
+    assert MODULE.cdn_media_path({"msg": 0}, "/comwechat/Files") is None
+    assert MODULE.cdn_media_path(
+        {"msg": 1, "path": r"C:\temp\123.png"},
+        "/comwechat/Files",
+    ) is None
+    assert MODULE.cdn_media_path(
+        {
+            "msg": 1,
+            "path": (
+                r"C:\Users\user\My Documents\WeChat Files"
+                r"\..\outside.png"
+            ),
+        },
+        "/comwechat/Files",
+    ) is None
+
+
+def test_only_recent_images_and_videos_request_original_download():
+    assert MODULE.should_request_original_media("image", 995, 1000)
+    assert MODULE.should_request_original_media("video", 995, 1000)
+    assert not MODULE.should_request_original_media("voice", 995, 1000)
+    assert not MODULE.should_request_original_media("image", 100, 1000)

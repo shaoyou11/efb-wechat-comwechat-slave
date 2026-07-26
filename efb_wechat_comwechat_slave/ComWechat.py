@@ -41,8 +41,10 @@ from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation
 from .contact_display import resolve_contact_name, update_existing_chat_name
 from .media_recovery import (
+    cdn_media_path,
     is_historical_media,
     media_wait_timeout,
+    should_request_original_media,
     should_use_thumbnail,
 )
 
@@ -526,8 +528,39 @@ class ComWeChatChannel(SlaveChannel):
                 return
 
         try:
+            original_timestamp = msg.get("timestamp")
+            if (
+                self.config.get("force_original_media_download", True)
+                and should_request_original_media(
+                    msg["type"],
+                    original_timestamp,
+                    self.started_at,
+                )
+            ):
+                try:
+                    result = self.bot.GetCdn(msgid=int(msg["msgid"]))
+                    original_path = cdn_media_path(result, self.dir)
+                    if original_path:
+                        msg["timestamp"] = int(time.time())
+                        msg["historical_media"] = False
+                        msg["filepath"] = original_path
+                        self.file_msg[original_path] = (msg, author, chat)
+                        self.logger.info(
+                            "已触发原始媒体下载: type=%s msgid=%s",
+                            msg["type"],
+                            msg["msgid"],
+                        )
+                        return
+                except Exception as e:
+                    self.logger.warning(
+                        "触发原始媒体下载失败，将使用现有附件流程: "
+                        "type=%s msgid=%s reason=%s",
+                        msg["type"],
+                        msg["msgid"],
+                        e,
+                    )
+
             if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
-                original_timestamp = msg.get("timestamp")
                 msg["timestamp"] = int(time.time())
                 msg["historical_media"] = (
                     msg["type"] in ("image", "voice")
