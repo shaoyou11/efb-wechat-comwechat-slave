@@ -665,7 +665,7 @@ class ComWeChatChannel(SlaveChannel):
         content = {
             "name": self.channel_name,
             "sender": self.channel_name,
-            "message": "检测到未登录状态，请发送 /extra 重新扫码登录",
+            "message": "检测到微信未登录，请发送 /login 获取登录二维码，或发送 /wechat 打开微信管理",
         }
         while True:
             time.sleep(1)
@@ -714,7 +714,7 @@ class ComWeChatChannel(SlaveChannel):
                 content = {
                     "name": self.user_auth_chat.name,
                     "sender": self.user_auth_chat.uid,
-                    "message": "尚未登录，请发送 /extra 扫码登录"
+                    "message": "检测到微信未登录，请发送 /login 获取登录二维码，或发送 /wechat 打开微信管理"
                 }
                 self.system_msg(content)
                 return msg
