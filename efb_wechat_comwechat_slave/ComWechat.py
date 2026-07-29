@@ -49,6 +49,7 @@ from .media_recovery import (
     should_request_original_media,
     should_use_thumbnail,
 )
+from .pending_files import PendingFileStore, delivery_confirmed
 
 from rich.console import Console
 from rich import print as rprint
@@ -90,7 +91,8 @@ class ComWeChatChannel(SlaveChannel):
         super().__init__(instance_id=instance_id)
         self.logger.info("ComWeChat Slave Channel initialized.")
         self.logger.info("Version: %s" % self.__version__)
-        self.config = load_config(efb_utils.get_config_path(self.channel_id))
+        config_path = efb_utils.get_config_path(self.channel_id)
+        self.config = load_config(config_path)
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
         self.login_confirmation = LoginConfirmation()
@@ -98,6 +100,10 @@ class ComWeChatChannel(SlaveChannel):
         self.historical_media_notice_sent = False
         self.cache = TTLCache(maxsize=200, ttl=self.time_out)
         self.file_msg = {}
+        self.file_retry_at = {}
+        self.pending_file_store = PendingFileStore(
+            Path(config_path).parent / "pending-files.json"
+        )
         self.delete_file = {}
 
         self.wxid = None
@@ -111,6 +117,7 @@ class ComWeChatChannel(SlaveChannel):
             uid = self.channel_name,
             name = self.channel_name,
         ))
+        self.restore_pending_file_messages()
 
         def update_contacts_wrapper(func):
             def wrapper(msg):
@@ -476,16 +483,69 @@ class ComWeChatChannel(SlaveChannel):
     @staticmethod
     def send_efb_msgs(efb_msgs: Union[Message, List[Message]], **kwargs):
         if not efb_msgs:
-            return
+            return []
         efb_msgs = [efb_msgs] if isinstance(efb_msgs, Message) else efb_msgs
         if 'deliver_to' not in kwargs:
             kwargs['deliver_to'] = coordinator.master
+        results = []
         for efb_msg in efb_msgs:
             for k, v in kwargs.items():
                 setattr(efb_msg, k, v)
-            coordinator.send_message(efb_msg)
-            if efb_msg.file:
-                efb_msg.file.close()
+            try:
+                results.append(coordinator.send_message(efb_msg))
+            finally:
+                if efb_msg.file:
+                    efb_msg.file.close()
+        return results
+
+    def queue_file_message(self, path, msg, author, chat):
+        self.file_msg[path] = (msg, author, chat)
+        if msg.get("type") != "share":
+            return
+        record = {
+            "msg": msg,
+            "chat_kind": "group" if isinstance(chat, GroupChat) else "private",
+            "chat_uid": str(chat.uid),
+            "chat_name": chat.name,
+            "author_uid": str(author.uid),
+            "author_name": author.name,
+            "author_alias": getattr(author, "alias", None),
+        }
+        self.pending_file_store.put(path, record)
+        self.logger.info(
+            "文件已进入持久待发队列: msgid=%s path=%s",
+            msg.get("msgid"),
+            path,
+        )
+
+    def restore_pending_file_messages(self):
+        restored = 0
+        for path, record in self.pending_file_store.items():
+            try:
+                msg = record["msg"]
+                msg["timestamp"] = int(time.time())
+                if record.get("chat_kind") == "group":
+                    chat = ChatMgr.build_efb_chat_as_group(EFBGroupChat(
+                        uid=record["chat_uid"],
+                        name=record["chat_name"],
+                    ))
+                    author = ChatMgr.build_efb_chat_as_member(chat, EFBGroupMember(
+                        uid=record["author_uid"],
+                        name=record.get("author_name") or record["author_uid"],
+                        alias=record.get("author_alias"),
+                    ))
+                else:
+                    chat = ChatMgr.build_efb_chat_as_private(EFBPrivateChat(
+                        uid=record["chat_uid"],
+                        name=record["chat_name"],
+                    ))
+                    author = chat.other
+                self.file_msg[path] = (msg, author, chat)
+                restored += 1
+            except Exception:
+                self.logger.exception("恢复待发文件失败: path=%s", path)
+        if restored:
+            self.logger.warning("已恢复 %s 个持久待发文件。", restored)
 
     def system_msg(self, content : Dict):
         self.logger.debug(f"system_msg:{content}")
@@ -572,13 +632,13 @@ class ComWeChatChannel(SlaveChannel):
                 )
                 msg["filepath"] = msg["filepath"].replace("\\","/")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
-                self.file_msg[msg["filepath"]] = ( msg , author , chat )
+                self.queue_file_message(msg["filepath"], msg, author, chat)
                 return
             if msg["type"] == "video":
                 msg["timestamp"] = int(time.time())
                 msg["filepath"] = msg["thumb_path"].replace("\\","/").replace(".jpg", ".mp4")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
-                self.file_msg[msg["filepath"]] = ( msg , author , chat )
+                self.queue_file_message(msg["filepath"], msg, author, chat)
                 return
         except:
             ...
@@ -592,7 +652,7 @@ class ComWeChatChannel(SlaveChannel):
                 self.started_at,
             )
             msg["filepath"] = f'''{self.dir}{msg["self"]}/{file_path}'''
-            self.file_msg[msg["filepath"]] = ( msg , author , chat )
+            self.queue_file_message(msg["filepath"], msg, author, chat)
             return
 
         self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
@@ -603,6 +663,8 @@ class ComWeChatChannel(SlaveChannel):
                 time.sleep(1)
             else:
                 for path in list(self.file_msg.keys()):
+                    if time.time() < self.file_retry_at.get(path, 0):
+                        continue
                     flag = False
                     should_send = True
                     msg = self.file_msg[path][0]
@@ -675,12 +737,43 @@ class ComWeChatChannel(SlaveChannel):
                             flag = True
 
                     if flag:
-                        del self.file_msg[path]
-                        if should_send:
+                        if not should_send:
+                            del self.file_msg[path]
+                            self.file_retry_at.pop(path, None)
+                            self.pending_file_store.remove(path)
+                            continue
+                        try:
                             msg.pop("_media_observed_size", None)
                             msg.pop("_media_stable_since", None)
                             msg.pop("wait_for_stable_media", None)
-                            self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+                            results = self.send_efb_msgs(
+                                MsgWrapper(msg, MsgProcess(msg, chat)),
+                                author=author,
+                                chat=chat,
+                                uid=MessageID(str(msg["msgid"])),
+                            )
+                            if not delivery_confirmed(results):
+                                raise EFBMessageError("Telegram 未返回投递确认")
+                        except Exception:
+                            self.file_retry_at[path] = time.time() + 30
+                            self.logger.exception(
+                                "文件投递未确认，30 秒后重试: msgid=%s path=%s",
+                                msg.get("msgid"),
+                                path,
+                            )
+                        else:
+                            del self.file_msg[path]
+                            self.file_retry_at.pop(path, None)
+                            self.pending_file_store.remove(path)
+                            status = (
+                                getattr(results[0], "vendor_specific", {})
+                                .get("telegram_delivery_status")
+                            )
+                            self.logger.info(
+                                "文件投递已确认: msgid=%s status=%s",
+                                msg.get("msgid"),
+                                status,
+                            )
 
                 time.sleep(0.1)
 
