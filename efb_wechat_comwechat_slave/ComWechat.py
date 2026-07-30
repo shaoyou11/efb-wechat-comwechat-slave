@@ -49,7 +49,11 @@ from .media_recovery import (
     should_request_original_media,
     should_use_thumbnail,
 )
-from .pending_files import PendingFileStore, delivery_confirmed
+from .pending_files import (
+    PendingFileStore,
+    build_pending_file_record,
+    delivery_confirmed,
+)
 
 from rich.console import Console
 from rich import print as rprint
@@ -500,17 +504,12 @@ class ComWeChatChannel(SlaveChannel):
 
     def queue_file_message(self, path, msg, author, chat):
         self.file_msg[path] = (msg, author, chat)
-        if msg.get("type") != "share":
-            return
-        record = {
-            "msg": msg,
-            "chat_kind": "group" if isinstance(chat, GroupChat) else "private",
-            "chat_uid": str(chat.uid),
-            "chat_name": chat.name,
-            "author_uid": str(author.uid),
-            "author_name": author.name,
-            "author_alias": getattr(author, "alias", None),
-        }
+        record = build_pending_file_record(
+            msg=msg,
+            author=author,
+            chat=chat,
+            chat_kind="group" if isinstance(chat, GroupChat) else "private",
+        )
         self.pending_file_store.put(path, record)
         self.logger.info(
             "文件已进入持久待发队列: msgid=%s path=%s",

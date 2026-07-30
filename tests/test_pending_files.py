@@ -40,3 +40,41 @@ def test_delivery_confirmation_requires_explicit_master_status():
     assert MODULE.delivery_confirmed([persisted_failure])
     assert not MODULE.delivery_confirmed([missing])
     assert not MODULE.delivery_confirmed([None])
+
+
+def test_build_pending_record_accepts_non_share_attachment():
+    author = SimpleNamespace(uid="wxid_author", name="Author", alias=None)
+    chat = SimpleNamespace(uid="wxid_chat", name="Chat")
+    msg = {
+        "msgid": 2,
+        "type": "image",
+        "filepath": "/data/image.jpg",
+        "_media_observed_size": 1024,
+        "_media_stable_since": 99.0,
+        "wait_for_stable_media": True,
+    }
+
+    record = MODULE.build_pending_file_record(
+        msg=msg,
+        author=author,
+        chat=chat,
+        chat_kind="private",
+    )
+
+    assert record["msg"]["type"] == "image"
+    assert record["msg"]["wait_for_stable_media"] is True
+    assert "_media_observed_size" not in record["msg"]
+    assert "_media_stable_since" not in record["msg"]
+    assert record["chat_uid"] == "wxid_chat"
+
+
+def test_pending_store_serializes_unexpected_values_safely(tmp_path):
+    path = tmp_path / "pending-files.json"
+    store = MODULE.PendingFileStore(path)
+    store.put(
+        "/data/example.bin",
+        {"msg": {"msgid": 3, "unexpected": b"bytes"}},
+    )
+
+    restored = MODULE.PendingFileStore(path).items()
+    assert restored[0][1]["msg"]["unexpected"] == "bytes"

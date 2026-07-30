@@ -6,6 +6,44 @@ from pathlib import Path
 from typing import Any, Dict
 
 
+EPHEMERAL_MESSAGE_FIELDS = {
+    "_media_observed_size",
+    "_media_stable_since",
+}
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+            if str(key) not in EPHEMERAL_MESSAGE_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def build_pending_file_record(msg, author, chat, chat_kind: str) -> Dict[str, Any]:
+    return {
+        "msg": _json_safe(msg),
+        "chat_kind": str(chat_kind),
+        "chat_uid": str(chat.uid),
+        "chat_name": str(chat.name),
+        "author_uid": str(author.uid),
+        "author_name": str(author.name),
+        "author_alias": (
+            None
+            if getattr(author, "alias", None) is None
+            else str(author.alias)
+        ),
+    }
+
+
 def delivery_confirmed(results) -> bool:
     if not results:
         return False
@@ -63,7 +101,7 @@ class PendingFileStore:
 
     def put(self, path: str, record: Dict[str, Any]) -> None:
         with self.lock:
-            self.records[str(path)] = dict(record)
+            self.records[str(path)] = _json_safe(record)
             self._save()
 
     def remove(self, path: str) -> None:
