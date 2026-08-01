@@ -1034,6 +1034,8 @@ class ComWeChatChannel(SlaveChannel):
 
 /addfriend - 后面格式'wxid message'
 
+/membercolor - 查看、开启或关闭群成员头像配色
+
 /getstaticinfo - 可获取 friends、groups、group_members、contacts 信息'''
                 self.system_msg({'sender':chat_uid, 'message':message})
             elif msg.text.startswith('/search'):
