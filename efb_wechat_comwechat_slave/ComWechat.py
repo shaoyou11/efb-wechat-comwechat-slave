@@ -553,7 +553,6 @@ class ComWeChatChannel(SlaveChannel):
         return results
 
     def queue_file_message(self, path, msg, author, chat):
-        self.file_msg[path] = (msg, author, chat)
         record = build_pending_file_record(
             msg=msg,
             author=author,
@@ -561,6 +560,7 @@ class ComWeChatChannel(SlaveChannel):
             chat_kind="group" if isinstance(chat, GroupChat) else "private",
         )
         self.pending_file_store.put(path, record)
+        self.file_msg[path] = (msg, author, chat)
         self.logger.info(
             "文件已进入持久待发队列: msgid=%s path=%s",
             msg.get("msgid"),
@@ -641,11 +641,8 @@ class ComWeChatChannel(SlaveChannel):
             except:
                 pass
 
-        if msg["msgid"] not in self.cache:
-            self.cache[msg["msgid"]] = msg["type"]
-        else:
-            if self.cache[msg["msgid"]] == msg["type"]:
-                return
+        if self.cache.get(msg["msgid"]) == msg["type"]:
+            return
 
         try:
             original_timestamp = msg.get("timestamp")
@@ -666,7 +663,8 @@ class ComWeChatChannel(SlaveChannel):
                         msg["wait_for_stable_media"] = True
                         msg["force_send_as_file"] = msg["type"] == "image"
                         msg["filepath"] = original_path
-                        self.file_msg[original_path] = (msg, author, chat)
+                        self.queue_file_message(original_path, msg, author, chat)
+                        self.cache[msg["msgid"]] = msg["type"]
                         self.logger.info(
                             "已触发原始媒体下载: type=%s msgid=%s",
                             msg["type"],
@@ -691,15 +689,24 @@ class ComWeChatChannel(SlaveChannel):
                 msg["filepath"] = msg["filepath"].replace("\\","/")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
                 self.queue_file_message(msg["filepath"], msg, author, chat)
+                self.cache[msg["msgid"]] = msg["type"]
                 return
             if msg["type"] == "video":
                 msg["timestamp"] = int(time.time())
                 msg["filepath"] = msg["thumb_path"].replace("\\","/").replace(".jpg", ".mp4")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
                 self.queue_file_message(msg["filepath"], msg, author, chat)
+                self.cache[msg["msgid"]] = msg["type"]
                 return
-        except:
-            ...
+        except Exception:
+            if msg.get("type") in ("image", "video", "voice", "share"):
+                self.logger.exception(
+                    "附件进入持久队列失败，交由 Bridge 延迟重试: "
+                    "type=%s msgid=%s",
+                    msg.get("type"),
+                    msg.get("msgid"),
+                )
+                raise
 
         if msg["type"] == "voice":
             file_path = re.search("clientmsgid=\"(.*?)\"", msg["message"]).group(1) + ".amr"
@@ -711,9 +718,11 @@ class ComWeChatChannel(SlaveChannel):
             )
             msg["filepath"] = f'''{self.dir}{msg["self"]}/{file_path}'''
             self.queue_file_message(msg["filepath"], msg, author, chat)
+            self.cache[msg["msgid"]] = msg["type"]
             return
 
         self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+        self.cache[msg["msgid"]] = msg["type"]
 
     def handle_file_msg(self):
         while True:

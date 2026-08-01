@@ -52,3 +52,34 @@ def test_download_file_keeps_non_empty_response(monkeypatch):
 
     downloaded.seek(0)
     assert downloaded.read() == b"video-data"
+
+
+def test_wait_for_local_file_allows_delayed_attachment(monkeypatch, tmp_path):
+    utils = _load_utils(monkeypatch, Response())
+    attachment = tmp_path / "delayed.dat"
+    ticks = iter((0.0, 0.0, 0.5, 0.5))
+
+    def release_file(_seconds):
+        attachment.write_bytes(b"ready")
+
+    utils.wait_for_local_file(
+        str(attachment),
+        timeout_seconds=1,
+        poll_interval=0.1,
+        sleep_fn=release_file,
+        monotonic_fn=lambda: next(ticks),
+    )
+
+
+def test_wait_for_local_file_raises_for_missing_attachment(monkeypatch, tmp_path):
+    utils = _load_utils(monkeypatch, Response())
+    ticks = iter((0.0, 0.0, 1.0))
+
+    with pytest.raises(FileNotFoundError, match="not ready"):
+        utils.wait_for_local_file(
+            str(tmp_path / "missing.dat"),
+            timeout_seconds=1,
+            poll_interval=0.1,
+            sleep_fn=lambda _seconds: None,
+            monotonic_fn=lambda: next(ticks),
+        )

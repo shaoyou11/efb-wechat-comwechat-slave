@@ -5,6 +5,7 @@ import requests as requests
 import re
 import json
 import yaml
+import time
 from typing import Dict , Any
 import pilk
 import pydub
@@ -66,6 +67,27 @@ def download_file(url: str, retry: int = 3) -> tempfile:
             break
     return file
 
+def wait_for_local_file(
+    file: str,
+    timeout_seconds: float = 10,
+    poll_interval: float = 0.5,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> None:
+    deadline = monotonic_fn() + max(0, timeout_seconds)
+    while True:
+        try:
+            if os.path.getsize(file) > 0:
+                return
+        except OSError:
+            pass
+        if monotonic_fn() >= deadline:
+            raise FileNotFoundError(
+                f"WeChat attachment is not ready after {timeout_seconds:g}s: {file}"
+            )
+        sleep_fn(max(0.01, poll_interval))
+
+
 def wechatimagedecode( file : str) -> tempfile:
     """
     代码来源 https://github.com/zhangxiaoyang/WechatImageDecoder
@@ -90,6 +112,7 @@ def wechatimagedecode( file : str) -> tempfile:
                 return (encoding, magic)
         return None
 
+    wait_for_local_file(file)
     with open(file , 'rb') as f:
         buf = bytearray(f.read())
     file_type, magic = guess_encoding(buf)
