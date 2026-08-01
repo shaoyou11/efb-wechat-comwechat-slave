@@ -55,6 +55,7 @@ from .pending_files import (
     delivery_confirmed,
 )
 from .login_qr import LoginQrStore, select_revoke_uids
+from .member_avatar_marker import MemberAvatarMarkerStore
 
 from rich.console import Console
 from rich import print as rprint
@@ -111,6 +112,10 @@ class ComWeChatChannel(SlaveChannel):
         )
         self.login_qr_store = LoginQrStore(
             Path(config_path).parent / "login-qrcodes.json"
+        )
+        self.member_avatar_markers = MemberAvatarMarkerStore(
+            Path(config_path).parent / "member-avatar-markers.json",
+            enabled=self.config.get("member_avatar_markers", True),
         )
         self.login_qr_ttl_seconds = max(
             30, int(self.config.get("login_qrcode_ttl_seconds", 180))
@@ -620,6 +625,15 @@ class ComWeChatChannel(SlaveChannel):
         self.send_efb_msgs(msg, uid=int(time.time()), chat=chat, author=author, type=MsgType.Text)
 
     def handle_msg(self , msg : Dict[str, Any] , author : 'ChatMember' , chat : 'Chat'):
+        if chat.uid.endswith("@chatroom") and author.uid != self.wxid:
+            marker = self.member_avatar_markers.marker_for(
+                author.uid,
+                self._load_member_avatar,
+            )
+            if marker:
+                vendor_specific = dict(getattr(author, "vendor_specific", {}) or {})
+                vendor_specific["avatar_color_marker"] = marker
+                author.vendor_specific = vendor_specific
         emojiList = re.findall('\[[\w|！|!| ]+\]' , msg["message"])
         for emoji in emojiList:
             try:
@@ -980,6 +994,29 @@ class ComWeChatChannel(SlaveChannel):
                 else:
                     message = '当前仅支持查询friends, groups, group_members, contacts'
                 self.system_msg({'sender':chat_uid, 'message':message})
+            elif msg.text.startswith('/membercolor'):
+                argument = msg.text[len('/membercolor'):].strip().lower()
+                if argument in {"on", "enable", "1", "开启"}:
+                    self.member_avatar_markers.set_enabled(True)
+                elif argument in {"off", "disable", "0", "关闭"}:
+                    self.member_avatar_markers.set_enabled(False)
+                avatar_count, total_count = self.member_avatar_markers.counts()
+                enabled = self.member_avatar_markers.enabled
+                commands = [MessageCommand(
+                    name="关闭头像配色" if enabled else "开启头像配色",
+                    callable_name="set_member_avatar_markers",
+                    kwargs={"enabled": not enabled},
+                )]
+                self.system_msg({
+                    'sender': chat_uid,
+                    'message': (
+                        f"群成员头像配色：{'已开启' if enabled else '已关闭'}\n"
+                        f"已缓存：{total_count} 人（头像取色 {avatar_count} 人）\n"
+                        "仅影响 Telegram 群聊成员名称前的标记。"
+                    ),
+                    'commands': commands,
+                })
+                return msg
             elif msg.text.startswith('/helpcomwechat'):
                 message = '''ComWechat 会话内命令（需在具体微信会话中手动输入）：
 
@@ -1109,6 +1146,16 @@ class ComWeChatChannel(SlaveChannel):
         except:
             ...
         return msg
+
+    def _load_member_avatar(self, wxid: str) -> Optional[BinaryIO]:
+        url = self.bot.GetPictureBySql(wxid=wxid)
+        if not url:
+            return None
+        return download_file(url, retry=1)
+
+    def set_member_avatar_markers(self, enabled: bool):
+        self.member_avatar_markers.set_enabled(bool(enabled))
+        return "群成员头像配色已开启" if enabled else "群成员头像配色已关闭"
 
     def send_text(self, wxid: ChatID, msg: Message) -> 'Message':
         text = msg.text

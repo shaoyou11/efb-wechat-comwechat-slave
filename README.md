@@ -51,6 +51,8 @@
 | `/getstaticinfo groups` | 查看群聊缓存 |
 | `/getstaticinfo group_members` | 查看群成员缓存 |
 | `/getstaticinfo contacts` | 查看联系人缓存 |
+| `/membercolor` | 查看群成员头像配色状态，并提供开启或关闭按钮 |
+| `/membercolor on` / `/membercolor off` | 开启或关闭 Telegram 群成员姓名前的头像主色标记 |
 | `/forward` | 回复目标微信消息后生成跨会话转发信息 |
 
 群管理指令在联系人私聊中会直接提示“该命令只能在微信群会话中使用”。是否执行成功仍取决于当前微信账号权限、群聊状态及 ComWechat 接口返回结果。
@@ -91,6 +93,7 @@ dir: "/comwechat/Files/"
 qrcode_timeout: 10
 login_qrcode_ttl_seconds: 180
 force_original_media_download: true
+member_avatar_markers: true
 ```
 
 | 配置项 | 说明 |
@@ -99,6 +102,7 @@ force_original_media_download: true
 | `qrcode_timeout` | 获取二维码接口的等待时间 |
 | `login_qrcode_ttl_seconds` | 登录二维码在 Telegram 中的最长保留秒数，默认 180 秒 |
 | `force_original_media_download` | 是否对新图片和视频主动请求原文件，默认开启 |
+| `member_avatar_markers` | 是否显示群成员头像主色标记，默认开启；运行状态持久保存在 `member-avatar-markers.json` |
 
 实际微信文件目录必须同时挂载到 ComWechat 容器和 EFB 容器。账号、密码、Token 和真实部署路径不得提交到公开仓库。
 

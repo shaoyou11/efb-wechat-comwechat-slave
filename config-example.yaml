@@ -4,3 +4,6 @@ slave_channels:
 middlewares:
 - QQ_War.keyword_reply
 - QQ_War.message_merge
+
+# 群成员名称前显示由微信头像主色生成的标记。
+member_avatar_markers: true
