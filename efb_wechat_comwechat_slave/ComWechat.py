@@ -11,7 +11,14 @@ from xml.sax.saxutils import escape
 
 import re
 import json
-from ehforwarderbot.chat import SystemChat, PrivateChat , SystemChatMember, ChatMember, SelfChatMember
+from ehforwarderbot.chat import (
+    SystemChat,
+    PrivateChat,
+    GroupChat,
+    SystemChatMember,
+    ChatMember,
+    SelfChatMember,
+)
 import hashlib
 from typing import Tuple, Optional, Collection, BinaryIO, Dict, Any , Union , List
 from datetime import datetime
