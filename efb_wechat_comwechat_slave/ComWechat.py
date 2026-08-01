@@ -54,6 +54,7 @@ from .pending_files import (
     build_pending_file_record,
     delivery_confirmed,
 )
+from .login_qr import LoginQrStore, select_revoke_uids
 
 from rich.console import Console
 from rich import print as rprint
@@ -108,6 +109,13 @@ class ComWeChatChannel(SlaveChannel):
         self.pending_file_store = PendingFileStore(
             Path(config_path).parent / "pending-files.json"
         )
+        self.login_qr_store = LoginQrStore(
+            Path(config_path).parent / "login-qrcodes.json"
+        )
+        self.login_qr_ttl_seconds = max(
+            30, int(self.config.get("login_qrcode_ttl_seconds", 180))
+        )
+        self.login_qr_lock = threading.RLock()
         self.delete_file = {}
 
         self.wxid = None
@@ -439,25 +447,61 @@ class ComWeChatChannel(SlaveChannel):
             msg.text = "登录成功"
             result = True
         else:
+            self.revoke_login_qrcodes(completed=True)
             msg.text = "登录失败，请重新登录"
             result = False
         self.send_efb_msgs(msg, chat=chat, author=author)
         return result
 
     def after_login(self):
+        self.revoke_login_qrcodes(completed=True)
         self.get_me()
         self.GetContactListBySql()
         self.GetGroupListBySql()
 
+    def revoke_login_qrcodes(self, completed=False):
+        if getattr(coordinator, "master", None) is None:
+            return 0
+        with self.login_qr_lock:
+            uids = select_revoke_uids(
+                self.login_qr_store.records(),
+                now=int(time.time()),
+                ttl_seconds=self.login_qr_ttl_seconds,
+                completed=completed,
+            )
+            removed = 0
+            for uid in uids:
+                message = Message(
+                    type=MsgType.Image,
+                    uid=MessageID(uid),
+                    chat=self.user_auth_chat,
+                    author=self.user_auth_chat.other,
+                )
+                try:
+                    coordinator.send_status(
+                        MessageRemoval(
+                            source_channel=self,
+                            destination_channel=coordinator.master,
+                            message=message,
+                        )
+                    )
+                except Exception as error:
+                    self.logger.warning("登录二维码收回失败，稍后重试: %s", error)
+                    continue
+                self.login_qr_store.remove(uid)
+                removed += 1
+            return removed
+
     @efb_utils.extra(name="重新扫码登录",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
+        self.revoke_login_qrcodes(completed=True)
         file = self.get_qrcode()
         chat = self.user_auth_chat
         author = self.user_auth_chat.other
         msg = Message(
             type=MsgType.Text,
-            uid=MessageID(str(int(time.time()))),
+            uid=MessageID(f"login-qr-{time.time_ns()}"),
         )
 
         if not file:
@@ -472,6 +516,7 @@ class ComWeChatChannel(SlaveChannel):
             msg.file = file
             msg.mime = 'image/png'
             self.send_efb_msgs(msg, chat=chat, author=author)
+            self.login_qr_store.add(msg.uid, created_at=int(time.time()))
         return "请扫描二维码登录"
 
     @efb_utils.extra(name="强制退出微信",
@@ -827,6 +872,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
+                self.revoke_login_qrcodes(completed=logged_in)
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     try:

@@ -7,6 +7,7 @@
 - 微信文字、图片、文件、语音、视频、链接和引用消息收发
 - 联系人、群聊、群成员及系统账号读取
 - 微信登录状态检测、二维码登录和强制退出
+- 登录成功、确认失败或二维码过期后自动收回 Telegram 中的登录二维码
 - 离线事件通过容器内部接口触发 Watchdog
 - 微信视频号分享解析，提供作者、标题、时长、封面及页面链接
 - 普通图片按消息 ID 主动请求原文件
@@ -88,6 +89,7 @@
 ```yaml
 dir: "/comwechat/Files/"
 qrcode_timeout: 10
+login_qrcode_ttl_seconds: 180
 force_original_media_download: true
 ```
 
@@ -95,6 +97,7 @@ force_original_media_download: true
 | --- | --- |
 | `dir` | EFB 容器内可访问的微信文件目录 |
 | `qrcode_timeout` | 获取二维码接口的等待时间 |
+| `login_qrcode_ttl_seconds` | 登录二维码在 Telegram 中的最长保留秒数，默认 180 秒 |
 | `force_original_media_download` | 是否对新图片和视频主动请求原文件，默认开启 |
 
 实际微信文件目录必须同时挂载到 ComWechat 容器和 EFB 容器。账号、密码、Token 和真实部署路径不得提交到公开仓库。
