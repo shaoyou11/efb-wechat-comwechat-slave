@@ -544,7 +544,14 @@ class ComWeChatChannel(SlaveChannel):
                 auto_recovery=True,
             )
             if text:
-                self._send_login_confirmation(text)
+                try:
+                    self._send_login_confirmation(text)
+                except Exception as error:
+                    self.logger.warning(
+                        "发送 watchdog 登录成功通知失败，保留恢复标记: %s",
+                        error,
+                    )
+                    return False
             self._remove_watchdog_recovery_success()
             return bool(text)
 
