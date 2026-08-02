@@ -13,6 +13,7 @@ SPEC = importlib.util.spec_from_file_location("login_confirmation", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 LoginConfirmation = MODULE.LoginConfirmation
+login_confirmation_message = MODULE.login_confirmation_message
 
 
 def test_concurrent_login_callbacks_confirm_only_once():
@@ -40,3 +41,10 @@ def test_concurrent_login_callbacks_confirm_only_once():
         thread.join()
 
     assert state["calls"] == 1
+
+
+def test_existing_session_recovery_does_not_announce_login():
+    assert login_confirmation_message(logged_in=True, has_pending_qr=False) is None
+    assert login_confirmation_message(logged_in=True, has_pending_qr=True) == "登录成功"
+    assert login_confirmation_message(logged_in=False, has_pending_qr=False) is None
+    assert login_confirmation_message(logged_in=False, has_pending_qr=True) == "登录失败，请重新登录"

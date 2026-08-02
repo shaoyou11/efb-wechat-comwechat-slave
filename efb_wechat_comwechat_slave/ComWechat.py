@@ -45,7 +45,7 @@ from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
-from .login_confirmation import LoginConfirmation
+from .login_confirmation import LoginConfirmation, login_confirmation_message
 from .contact_display import resolve_contact_name, update_existing_chat_name
 from .command_validation import chatroom_member_ids, group_command_error
 from .media_recovery import (
@@ -454,15 +454,26 @@ class ComWeChatChannel(SlaveChannel):
             type=MsgType.Text,
             uid=MessageID(str(int(time.time()))),
         )
+        has_pending_qr = bool(self.login_qr_store.records())
         if self.is_login():
             self.after_login()
-            msg.text = "登录成功"
+            msg.text = login_confirmation_message(
+                logged_in=True,
+                has_pending_qr=has_pending_qr,
+            )
+            if msg.text:
+                self.send_efb_msgs(msg, chat=chat, author=author)
             result = True
         else:
+            if not has_pending_qr:
+                return False
             self.revoke_login_qrcodes(completed=True)
-            msg.text = "登录失败，请重新登录"
+            msg.text = login_confirmation_message(
+                logged_in=False,
+                has_pending_qr=True,
+            )
+            self.send_efb_msgs(msg, chat=chat, author=author)
             result = False
-        self.send_efb_msgs(msg, chat=chat, author=author)
         return result
 
     def after_login(self):
