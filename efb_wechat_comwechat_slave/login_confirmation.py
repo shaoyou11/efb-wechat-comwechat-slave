@@ -5,8 +5,9 @@ from typing import Callable, Optional
 def login_confirmation_message(
     logged_in: bool,
     has_pending_qr: bool,
+    auto_recovery: bool = False,
 ) -> Optional[str]:
-    if not has_pending_qr:
+    if not has_pending_qr and not auto_recovery:
         return None
     return "登录成功" if logged_in else "登录失败，请重新登录"
 

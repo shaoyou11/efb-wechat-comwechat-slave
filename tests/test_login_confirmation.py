@@ -48,3 +48,14 @@ def test_existing_session_recovery_does_not_announce_login():
     assert login_confirmation_message(logged_in=True, has_pending_qr=True) == "登录成功"
     assert login_confirmation_message(logged_in=False, has_pending_qr=False) is None
     assert login_confirmation_message(logged_in=False, has_pending_qr=True) == "登录失败，请重新登录"
+
+
+def test_watchdog_recovery_announces_login_without_qr():
+    assert (
+        login_confirmation_message(
+            logged_in=True,
+            has_pending_qr=False,
+            auto_recovery=True,
+        )
+        == "登录成功"
+    )

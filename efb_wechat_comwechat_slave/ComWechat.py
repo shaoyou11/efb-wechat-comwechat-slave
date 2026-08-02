@@ -128,6 +128,13 @@ class ComWeChatChannel(SlaveChannel):
             30, int(self.config.get("login_qrcode_ttl_seconds", 180))
         )
         self.login_qr_lock = threading.RLock()
+        self.watchdog_recovery_success_path = Path(
+            os.getenv(
+                "WATCHDOG_RECOVERY_SUCCESS_PATH",
+                "/data/watchdog/state/auto-recovery-success.json",
+            )
+        )
+        self.watchdog_recovery_lock = threading.RLock()
         self.delete_file = {}
 
         self.wxid = None
@@ -457,10 +464,14 @@ class ComWeChatChannel(SlaveChannel):
         has_pending_qr = bool(self.login_qr_store.records())
         if self.is_login():
             self.after_login()
-            msg.text = login_confirmation_message(
-                logged_in=True,
-                has_pending_qr=has_pending_qr,
-            )
+            auto_recovery = self.announce_watchdog_recovery_success()
+            if auto_recovery:
+                msg.text = None
+            else:
+                msg.text = login_confirmation_message(
+                    logged_in=True,
+                    has_pending_qr=has_pending_qr,
+                )
             if msg.text:
                 self.send_efb_msgs(msg, chat=chat, author=author)
             result = True
@@ -475,6 +486,67 @@ class ComWeChatChannel(SlaveChannel):
             self.send_efb_msgs(msg, chat=chat, author=author)
             result = False
         return result
+
+    def _send_login_confirmation(self, text: str):
+        msg = Message(
+            type=MsgType.Text,
+            uid=MessageID(f"login-{time.time_ns()}"),
+        )
+        msg.text = text
+        self.send_efb_msgs(
+            msg,
+            chat=self.user_auth_chat,
+            author=self.user_auth_chat.other,
+        )
+
+    def _remove_watchdog_recovery_success(self):
+        try:
+            self.watchdog_recovery_success_path.unlink(missing_ok=True)
+        except OSError as error:
+            self.logger.warning("删除 watchdog 恢复标记失败: %s", error)
+
+    def announce_watchdog_recovery_success(self) -> bool:
+        with self.watchdog_recovery_lock:
+            try:
+                payload = json.loads(
+                    self.watchdog_recovery_success_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except FileNotFoundError:
+                return False
+            except (OSError, ValueError, TypeError) as error:
+                self.logger.warning("读取 watchdog 恢复标记失败: %s", error)
+                return False
+
+            if not isinstance(payload, dict):
+                self._remove_watchdog_recovery_success()
+                return False
+            if payload.get("version") != 1:
+                self._remove_watchdog_recovery_success()
+                return False
+            if payload.get("source") not in {"event", "night"}:
+                self._remove_watchdog_recovery_success()
+                return False
+            try:
+                age = time.time() - float(payload["created_at"])
+            except (KeyError, TypeError, ValueError):
+                self._remove_watchdog_recovery_success()
+                return False
+            if not 0 <= age <= 15 * 60:
+                self.logger.info("忽略过期的 watchdog 恢复标记")
+                self._remove_watchdog_recovery_success()
+                return False
+
+            text = login_confirmation_message(
+                logged_in=True,
+                has_pending_qr=False,
+                auto_recovery=True,
+            )
+            if text:
+                self._send_login_confirmation(text)
+            self._remove_watchdog_recovery_success()
+            return bool(text)
 
     def after_login(self):
         self.revoke_login_qrcodes(completed=True)
@@ -914,6 +986,9 @@ class ComWeChatChannel(SlaveChannel):
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
                 self.revoke_login_qrcodes(completed=logged_in)
+                if logged_in and self.watchdog_recovery_success_path.exists():
+                    self.after_login()
+                    self.announce_watchdog_recovery_success()
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     try:
