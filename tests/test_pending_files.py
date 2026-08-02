@@ -32,12 +32,16 @@ def test_delivery_confirmation_requires_explicit_master_status():
         vendor_specific={"telegram_delivery_status": "delivered"}
     )
     persisted_failure = SimpleNamespace(
+        vendor_specific={"telegram_delivery_status": "stored_for_retry"}
+    )
+    ordinary_failure = SimpleNamespace(
         vendor_specific={"telegram_delivery_status": "failed"}
     )
     missing = SimpleNamespace(vendor_specific={})
 
     assert MODULE.delivery_confirmed([delivered])
     assert MODULE.delivery_confirmed([persisted_failure])
+    assert not MODULE.delivery_confirmed([ordinary_failure])
     assert not MODULE.delivery_confirmed([missing])
     assert not MODULE.delivery_confirmed([None])
 

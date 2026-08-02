@@ -59,7 +59,7 @@ def delivery_confirmed(results) -> bool:
             return False
         statuses.append(status)
     return all(
-        status in {"delivered", "filtered", "skipped", "failed"}
+        status in {"delivered", "filtered", "skipped", "stored_for_retry"}
         for status in statuses
     )
 
