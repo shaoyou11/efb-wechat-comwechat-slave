@@ -171,29 +171,6 @@ def test_finder_feed_wrapper_returns_video(monkeypatch):
     assert "当前微信版本不支持" not in message.text
 
 
-def test_finder_feed_wrapper_uses_video_fallback_without_direct_url(monkeypatch):
-    msg_deco = _load_msg_deco(monkeypatch)
-    xml_without_video_url = FINDER_XML.replace(
-        '<url><![CDATA[https://example.test/video.mp4]]></url>',
-        "",
-    )
-    requested = []
-
-    def video_fallback(url):
-        requested.append(url)
-        return _temp_media(".mp4")
-
-    message = msg_deco.efb_finder_feed_wrapper(
-        xml_without_video_url,
-        downloader=lambda url: _temp_media(".jpg"),
-        video_downloader=video_fallback,
-    )
-
-    assert requested == [""]
-    assert message.type == "video"
-    assert message.filename == "wechat-channel.mp4"
-
-
 def test_finder_feed_wrapper_falls_back_to_cover_with_link(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
     requested = []

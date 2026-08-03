@@ -40,14 +40,7 @@ from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat, EFBGroupMember, EFBSystemUser
 from .MsgDeco import qutoed_text
 from .MsgProcess import MsgProcess, MsgWrapper
-from .Utils import (
-    WC_EMOTICON_CONVERSION,
-    download_file,
-    load_config,
-    load_local_file_to_temp,
-    load_temp_file_to_local,
-    wait_for_local_file,
-)
+from .Utils import download_file , load_config , load_temp_file_to_local , WC_EMOTICON_CONVERSION
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
@@ -829,50 +822,8 @@ class ComWeChatChannel(SlaveChannel):
             self.cache[msg["msgid"]] = msg["type"]
             return
 
-        finder_feed_video_downloader = None
-        if msg.get("type") == "share":
-            finder_feed_video_downloader = (
-                lambda url: self._download_finder_feed_video(msg, url)
-            )
-        self.send_efb_msgs(
-            MsgWrapper(
-                msg,
-                MsgProcess(
-                    msg,
-                    chat,
-                    finder_feed_video_downloader=finder_feed_video_downloader,
-                ),
-            ),
-            author=author,
-            chat=chat,
-            uid=MessageID(str(msg['msgid'])),
-        )
+        self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
         self.cache[msg["msgid"]] = msg["type"]
-
-    def _download_finder_feed_video(self, msg: Dict[str, Any], url: str):
-        direct_error = None
-        if url:
-            try:
-                return download_file(url, retry=1)
-            except Exception as error:
-                direct_error = error
-
-        try:
-            result = self.bot.GetCdn(msgid=int(msg["msgid"]))
-            local_path = cdn_media_path(result, self.dir)
-            if not local_path:
-                raise FileNotFoundError("微信未返回视频本地路径")
-            wait_for_local_file(local_path, timeout_seconds=10)
-            return load_local_file_to_temp(local_path)
-        except Exception as error:
-            self.logger.warning(
-                "视频号视频获取失败，继续使用封面降级: direct=%s cdn=%s",
-                type(direct_error).__name__ if direct_error else "missing",
-                type(error).__name__,
-            )
-            if direct_error is not None:
-                raise direct_error
-            raise
 
     def handle_file_msg(self):
         while True:
