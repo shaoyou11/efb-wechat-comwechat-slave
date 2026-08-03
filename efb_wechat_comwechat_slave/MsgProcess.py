@@ -24,7 +24,11 @@ def MsgWrapper(msg, efb_msgs:  Union[Message, List[Message]]):
         setattr(efb_msg, "vendor_specific", vendor_specific)
     return efb_msgs
 
-def MsgProcess(msg : dict , chat) -> Union[Message, List[Message]]:
+def MsgProcess(
+    msg: dict,
+    chat,
+    finder_feed_video_downloader=None,
+) -> Union[Message, List[Message]]:
 
     if msg["type"] == "text":
         at_list = {}
@@ -66,7 +70,11 @@ def MsgProcess(msg : dict , chat) -> Union[Message, List[Message]]:
         if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
             file = open(msg["filepath"], "rb")
             return efb_file_wrapper(file, os.path.basename(msg["filepath"]))
-        return efb_share_link_wrapper(msg, chat)  # may return msgs in a list
+        return efb_share_link_wrapper(
+            msg,
+            chat,
+            video_downloader=finder_feed_video_downloader,
+        )  # may return msgs in a list
 
     elif msg["type"] == "voice":
         file = convert_silk_to_mp3(load_local_file_to_temp(msg["filepath"]))

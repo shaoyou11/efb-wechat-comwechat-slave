@@ -158,6 +158,7 @@ def efb_video_wrapper(file: IO, filename: str = None, text: str = None) -> Messa
 def efb_finder_feed_wrapper(
     xml_text: str,
     downloader=download_file,
+    video_downloader=None,
 ) -> Message:
     feed = parse_finder_feed(xml_text)
     if feed is None:
@@ -174,9 +175,13 @@ def efb_finder_feed_wrapper(
         lines.append(f"视频链接：{feed.share_url}")
     caption = "\n".join(lines)
 
-    if feed.video_url:
+    if feed.video_url or video_downloader is not None:
         try:
-            video = downloader(feed.video_url)
+            video = (
+                video_downloader(feed.video_url)
+                if video_downloader is not None
+                else downloader(feed.video_url)
+            )
             return efb_video_wrapper(
                 video,
                 filename="wechat-channel.mp4",
@@ -260,7 +265,11 @@ def efb_mp_post_wrapper(item: etree.Element, show_name: str = None) -> Message:
         text=f'{title}\n  - - - - - - - - - - - - - - - \n{digest}' if digest else str(title),
     )
 
-def efb_share_link_wrapper(message: dict, chat) -> Message:
+def efb_share_link_wrapper(
+    message: dict,
+    chat,
+    video_downloader=None,
+) -> Message:
     """
     处理msgType49消息 - 复合xml, xml 中 //appmsg/type 指示具体消息类型.
     /msg/appmsg/type
@@ -491,7 +500,10 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                 vendor_specific={ "is_forwarded": True }
             )
         elif type == 51: # 视频（微信视频号分享）
-            return efb_finder_feed_wrapper(text)
+            return efb_finder_feed_wrapper(
+                text,
+                video_downloader=video_downloader,
+            )
         elif type == 57: # 引用（回复）消息
             msg = xml.xpath('/msg/appmsg/title/text()')[0]
             refer_msgType = int(xml.xpath('/msg/appmsg/refermsg/type/text()')[0]) # 被引用消息类型
