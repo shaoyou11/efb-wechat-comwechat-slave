@@ -46,7 +46,11 @@ from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import LoginConfirmation, login_confirmation_message
-from .contact_display import resolve_contact_name, update_existing_chat_name
+from .contact_display import (
+    extract_mentioned_alias,
+    resolve_contact_name,
+    update_existing_chat_name,
+)
 from .command_validation import chatroom_member_ids, group_command_error
 from .media_recovery import (
     cdn_media_path,
@@ -1460,8 +1464,9 @@ class ComWeChatChannel(SlaveChannel):
     def extract_alias(self, msg):
         sender = msg["sender"]
         extracted = False
-        if "<refermsg>" in msg["message"]:
-            xml = etree.fromstring(msg["message"])
+        message = msg.get("message", "")
+        if "<refermsg>" in message:
+            xml = etree.fromstring(message)
             id = xml.xpath('string(/msg/appmsg/refermsg/chatusr)')
             alias = xml.xpath('string(/msg/appmsg/refermsg/displayname)')
             name = self.get_nickname_by_wxid(id)
@@ -1471,14 +1476,16 @@ class ComWeChatChannel(SlaveChannel):
                     id: alias
                 })
 
-        if not extracted and "<atuserlist>" in msg["extrainfo"]:
+        if not extracted and "<atuserlist>" in msg.get("extrainfo", ""):
             xml = etree.fromstring(msg["extrainfo"])
             at_user = xml.xpath('string(/msgsource/atuserlist)')
             user_list = [user for user in at_user.split(",") if user]
             if len(user_list) == 1:
                 try:
                     name = self.get_nickname_by_wxid(user_list[0])
-                    alias = re.search("^@(.*)\u2005", msg["message"]).group(1)
+                    alias = extract_mentioned_alias(message)
+                    if not alias:
+                        return
                     if alias != name:
                         self.merge_group_members(sender, {
                             user_list[0]: alias

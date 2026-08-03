@@ -8,6 +8,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 resolve_contact_name = MODULE.resolve_contact_name
 update_existing_chat_name = MODULE.update_existing_chat_name
+extract_mentioned_alias = MODULE.extract_mentioned_alias
 
 
 def test_notifymessage_is_localized_without_lookup():
@@ -32,6 +33,24 @@ def test_technical_public_account_id_is_refreshed_from_wechat_database():
         return [wxid, "", "", "岁月观", "3"]
 
     assert resolve_contact_name("gh_366bf6794a09", "gh_366bf6794a09", lookup) == "岁月观"
+
+
+def test_openim_customer_service_id_is_refreshed_from_wechat_database():
+    calls = []
+
+    def lookup(wxid):
+        calls.append(wxid)
+        return [wxid, "", "", "国开客服", "3"]
+
+    wxid = "25984993499793938@kefu.openim"
+    assert resolve_contact_name(wxid, wxid, lookup) == "国开客服"
+    assert calls == [wxid]
+
+
+def test_malformed_mention_does_not_raise_or_return_a_partial_alias():
+    assert extract_mentioned_alias("普通消息") is None
+    assert extract_mentioned_alias("@苏晶晶\u2005你好") == "苏晶晶"
+    assert extract_mentioned_alias("@苏晶晶") == "苏晶晶"
 
 
 def test_existing_chinese_name_does_not_query_database_again():

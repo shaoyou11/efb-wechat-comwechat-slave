@@ -15,7 +15,17 @@ SYSTEM_CONTACT_NAMES = {
     "qqmail": "QQ邮箱提醒",
 }
 
-TECHNICAL_ID_PATTERN = re.compile(r"^(?:gh_|wxid_|v1_).+", re.IGNORECASE)
+TECHNICAL_ID_PATTERN = re.compile(
+    r"^(?:(?:gh_|wxid_|v1_).+|[^@\s]+@(?:kefu\.)?openim)$",
+    re.IGNORECASE,
+)
+MENTION_ALIAS_PATTERN = re.compile(r"^@([^\u2005\r\n]+?)(?:\u2005|\s|$)")
+
+
+def extract_mentioned_alias(message: str) -> Optional[str]:
+    """Return the leading WeChat @-mention name when its separator is valid."""
+    match = MENTION_ALIAS_PATTERN.match(str(message or ""))
+    return match.group(1).strip() if match else None
 
 
 def _is_technical_name(wxid: str, name: Optional[str]) -> bool:
