@@ -4,6 +4,13 @@ class OfflineNotificationPolicy:
     def __init__(self, interval_seconds: int):
         self.interval_seconds = interval_seconds
         self.last_notification_at = None
+        self.last_logged_in = None
+
+    def observe_login_transition(self, logged_in: bool) -> bool:
+        """Return once when an observed offline session becomes online."""
+        transitioned = self.last_logged_in is False and logged_in
+        self.last_logged_in = logged_in
+        return transitioned
 
     def observe(self, logged_in: bool, now: float) -> bool:
         if logged_in:

@@ -996,10 +996,22 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
+                login_transition = offline_notification.observe_login_transition(
+                    logged_in
+                )
                 self.revoke_login_qrcodes(completed=logged_in)
+                auto_recovery_announced = False
                 if logged_in and self.watchdog_recovery_success_path.exists():
                     self.after_login()
-                    self.announce_watchdog_recovery_success()
+                    auto_recovery_announced = self.announce_watchdog_recovery_success()
+                if (
+                    login_transition
+                    and self.wxid is None
+                    and not auto_recovery_announced
+                    and not self.watchdog_recovery_success_path.exists()
+                ):
+                    self.after_login()
+                    self._send_login_confirmation("登录成功")
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     try:

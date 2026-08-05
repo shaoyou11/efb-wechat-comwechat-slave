@@ -39,3 +39,24 @@ def test_login_resets_offline_notification_cycle():
     assert policy.observe(logged_in=True, now=200.0) is False
 
     assert policy.observe(logged_in=False, now=201.0) is True
+
+
+def test_first_logged_in_observation_is_only_a_baseline():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+
+    assert policy.observe_login_transition(logged_in=True) is False
+
+
+def test_offline_to_online_reports_one_login_transition():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+
+    assert policy.observe_login_transition(logged_in=False) is False
+    assert policy.observe_login_transition(logged_in=True) is True
+    assert policy.observe_login_transition(logged_in=True) is False
+
+
+def test_online_to_offline_does_not_report_as_login_transition():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+
+    policy.observe_login_transition(logged_in=True)
+    assert policy.observe_login_transition(logged_in=False) is False
