@@ -27,3 +27,19 @@ class LoginConfirmation:
             if is_confirmed():
                 return True
             return confirm()
+
+
+class LoginRetryState:
+    """Keep a manual-login confirmation pending across transient init failures."""
+
+    def __init__(self):
+        self.confirmation_pending = False
+
+    def observe_transition(self, login_transition: bool) -> None:
+        if login_transition:
+            self.confirmation_pending = True
+
+    def consume_after_success(self) -> bool:
+        pending = self.confirmation_pending
+        self.confirmation_pending = False
+        return pending

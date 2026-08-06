@@ -13,6 +13,7 @@ SPEC = importlib.util.spec_from_file_location("login_confirmation", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 LoginConfirmation = MODULE.LoginConfirmation
+LoginRetryState = MODULE.LoginRetryState
 login_confirmation_message = MODULE.login_confirmation_message
 
 
@@ -59,3 +60,12 @@ def test_watchdog_recovery_announces_login_without_qr():
         )
         == "登录成功"
     )
+
+
+def test_login_confirmation_remains_pending_until_initialization_succeeds():
+    state = LoginRetryState()
+    state.observe_transition(True)
+
+    assert state.confirmation_pending is True
+    assert state.consume_after_success() is True
+    assert state.consume_after_success() is False
