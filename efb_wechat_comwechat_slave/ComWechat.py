@@ -45,11 +45,7 @@ from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
-from .login_confirmation import (
-    LoginConfirmation,
-    LoginRetryState,
-    login_confirmation_message,
-)
+from .login_confirmation import LoginConfirmation, login_confirmation_message
 from .contact_display import (
     extract_mentioned_alias,
     resolve_contact_name,
@@ -117,7 +113,6 @@ class ComWeChatChannel(SlaveChannel):
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
         self.login_confirmation = LoginConfirmation()
-        self.login_retry_state = LoginRetryState()
         self.started_at = int(time.time())
         self.historical_media_notice_sent = False
         self.cache = TTLCache(maxsize=200, ttl=self.time_out)
@@ -995,36 +990,35 @@ class ComWeChatChannel(SlaveChannel):
         while True:
             time.sleep(1)
             count += 1
-            try:
-                if count % 1800 == 0 and self.wxid is not None:
+            if count % 1800 == 0:
+                if self.wxid is not None:
                     self.GetGroupListBySql()
                     self.GetContactListBySql()
-                if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
-                    logged_in = self.is_login()
-                    login_transition = offline_notification.observe_login_transition(
-                        logged_in
-                    )
-                    self.login_retry_state.observe_transition(login_transition)
-                    self.revoke_login_qrcodes(completed=logged_in)
-                    recovery_marker_exists = (
-                        logged_in and self.watchdog_recovery_success_path.exists()
-                    )
-                    if recovery_marker_exists:
-                        self.after_login()
-                        self.announce_watchdog_recovery_success()
-                    elif logged_in and self.wxid is None:
-                        self.after_login()
-                        if self.login_retry_state.consume_after_success():
-                            self._send_login_confirmation("登录成功")
-                    if offline_notification.observe(logged_in, time.monotonic()):
-                        self.wxid = None
-                        try:
-                            notify_watchdog()
-                        except Exception as error:
-                            self.logger.warning("Unable to trigger login watchdog: %s", error)
-                        self.system_msg(content)
-            except Exception:
-                self.logger.exception("微信状态定时任务执行失败，将在下一轮自动重试")
+            if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
+                logged_in = self.is_login()
+                login_transition = offline_notification.observe_login_transition(
+                    logged_in
+                )
+                self.revoke_login_qrcodes(completed=logged_in)
+                auto_recovery_announced = False
+                if logged_in and self.watchdog_recovery_success_path.exists():
+                    self.after_login()
+                    auto_recovery_announced = self.announce_watchdog_recovery_success()
+                if (
+                    login_transition
+                    and self.wxid is None
+                    and not auto_recovery_announced
+                    and not self.watchdog_recovery_success_path.exists()
+                ):
+                    self.after_login()
+                    self._send_login_confirmation("登录成功")
+                if offline_notification.observe(logged_in, time.monotonic()):
+                    self.wxid = None
+                    try:
+                        notify_watchdog()
+                    except Exception as error:
+                        self.logger.warning("Unable to trigger login watchdog: %s", error)
+                    self.system_msg(content)
 
     #获取全部联系人
     def get_chats(self) -> Collection['Chat']:
