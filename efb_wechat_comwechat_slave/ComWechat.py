@@ -642,6 +642,8 @@ class ComWeChatChannel(SlaveChannel):
         efb_msgs = [efb_msgs] if isinstance(efb_msgs, Message) else efb_msgs
         if 'deliver_to' not in kwargs:
             kwargs['deliver_to'] = coordinator.master
+        if kwargs.get('deliver_to') is None:
+            raise EFBException("EFB 主频道尚未就绪，保留消息等待重试")
         results = []
         for efb_msg in efb_msgs:
             for k, v in kwargs.items():
