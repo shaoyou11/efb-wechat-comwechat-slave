@@ -8,7 +8,18 @@ class OfflineNotificationPolicy:
 
     def observe_login_transition(self, logged_in: bool) -> bool:
         """Return once when an observed offline session becomes online."""
-        transitioned = self.last_logged_in is False and logged_in
+        return self.observe_session_transition(logged_in) == "login"
+
+    def observe_session_transition(self, logged_in: bool):
+        """Return ``login`` or ``logout`` once for an observed state change."""
+        if self.last_logged_in is None:
+            self.last_logged_in = logged_in
+            return None
+        transitioned = None
+        if self.last_logged_in is False and logged_in:
+            transitioned = "login"
+        elif self.last_logged_in is True and not logged_in:
+            transitioned = "logout"
         self.last_logged_in = logged_in
         return transitioned
 

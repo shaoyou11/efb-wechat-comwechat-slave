@@ -60,3 +60,14 @@ def test_online_to_offline_does_not_report_as_login_transition():
 
     policy.observe_login_transition(logged_in=True)
     assert policy.observe_login_transition(logged_in=False) is False
+
+
+def test_session_transition_reports_login_and_logout_once():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+
+    assert policy.observe_session_transition(logged_in=True) is None
+    assert policy.observe_session_transition(logged_in=True) is None
+    assert policy.observe_session_transition(logged_in=False) == "logout"
+    assert policy.observe_session_transition(logged_in=False) is None
+    assert policy.observe_session_transition(logged_in=True) == "login"
+    assert policy.observe_session_transition(logged_in=True) is None

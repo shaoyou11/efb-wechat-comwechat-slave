@@ -68,6 +68,7 @@ from .pending_files import (
     delivery_confirmed,
 )
 from .login_qr import LoginQrStore, select_revoke_uids
+from .session_events import SessionEventStore
 from .member_avatar_marker import MemberAvatarMarkerStore
 
 from rich.console import Console
@@ -132,6 +133,9 @@ class ComWeChatChannel(SlaveChannel):
         )
         self.login_qr_store = LoginQrStore(
             Path(config_path).parent / "login-qrcodes.json"
+        )
+        self.session_event_store = SessionEventStore(
+            Path(config_path).parent / "session-events.json"
         )
         self.member_avatar_markers = MemberAvatarMarkerStore(
             Path(config_path).parent / "member-avatar-markers.json",
@@ -484,6 +488,8 @@ class ComWeChatChannel(SlaveChannel):
         )
         has_pending_qr = bool(self.login_qr_store.records())
         if self.is_login():
+            if has_pending_qr:
+                self.session_event_store.record_login()
             self.after_login()
             auto_recovery = self.announce_watchdog_recovery_success()
             if auto_recovery:
@@ -525,6 +531,17 @@ class ComWeChatChannel(SlaveChannel):
             self.watchdog_recovery_success_path.unlink(missing_ok=True)
         except OSError as error:
             self.logger.warning("删除 watchdog 恢复标记失败: %s", error)
+
+    def _cleanup_master_login_prompts(self):
+        master = getattr(coordinator, "master", None)
+        cleanup = getattr(master, "cleanup_login_prompts", None)
+        if not callable(cleanup):
+            return 0
+        try:
+            return cleanup()
+        except Exception as error:
+            self.logger.warning("清理 Telegram 登录提示失败: %s", error)
+            return 0
 
     def announce_watchdog_recovery_success(self) -> bool:
         with self.watchdog_recovery_lock:
@@ -578,6 +595,7 @@ class ComWeChatChannel(SlaveChannel):
 
     def after_login(self):
         self.revoke_login_qrcodes(completed=True)
+        self._cleanup_master_login_prompts()
         self.get_me()
         self.GetContactListBySql()
         self.GetGroupListBySql()
@@ -654,10 +672,13 @@ class ComWeChatChannel(SlaveChannel):
     @efb_utils.extra(name="强制退出微信",
            desc="强制退出")
     def force_logout(self, _: str = "") -> str:
+        was_logged_in = self.is_login()
         res = self.bot.post(44, params=EmptyJsonResponse())
         if self.is_login():
             return "退出失败，原因: %s" % res
         else:
+            if was_logged_in:
+                self.session_event_store.record_logout()
             self.wxid = None
             return "退出成功"
 
@@ -1070,9 +1091,14 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
-                login_transition = offline_notification.observe_login_transition(
+                session_transition = offline_notification.observe_session_transition(
                     logged_in
                 )
+                login_transition = session_transition == "login"
+                if session_transition == "login":
+                    self.session_event_store.record_login()
+                elif session_transition == "logout":
+                    self.session_event_store.record_logout()
                 self.revoke_login_qrcodes(completed=logged_in)
                 auto_recovery_announced = False
                 if logged_in and self.watchdog_recovery_success_path.exists():
