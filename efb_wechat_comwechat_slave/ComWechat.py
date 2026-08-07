@@ -678,6 +678,35 @@ class ComWeChatChannel(SlaveChannel):
             path,
         )
 
+    def request_pending_file_delivery(self, path):
+        """Allow the EFB operations panel to release one pending attachment."""
+        path = str(path)
+        pending = self.file_msg.get(path)
+        if pending is None:
+            return "not_found"
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                return "not_ready"
+        except OSError:
+            return "not_ready"
+        msg = pending[0]
+        msg["wait_for_stable_media"] = False
+        msg.pop("_media_observed_size", None)
+        msg.pop("_media_stable_since", None)
+        self.file_retry_at[path] = 0
+        self.logger.info("手动释放待发文件: path=%s", path)
+        return "queued"
+
+    def remove_pending_file(self, path):
+        """Remove one pending attachment from memory and its durable index."""
+        path = str(path)
+        if self.file_msg.pop(path, None) is None:
+            return "not_found"
+        self.file_retry_at.pop(path, None)
+        self.pending_file_store.remove(path)
+        self.logger.info("手动删除待发文件记录: path=%s", path)
+        return "removed"
+
     def restore_pending_file_messages(self):
         restored = 0
         for path, record in self.pending_file_store.items():
@@ -857,9 +886,12 @@ class ComWeChatChannel(SlaveChannel):
                         continue
                     flag = False
                     should_send = True
-                    msg = self.file_msg[path][0]
-                    author = self.file_msg[path][1]
-                    chat = self.file_msg[path][2]
+                    pending = self.file_msg.get(path)
+                    if pending is None:
+                        continue
+                    msg = pending[0]
+                    author = pending[1]
+                    chat = pending[2]
                     thumb_path = ""
                     if msg["type"] == "image" and msg.get("thumb_path"):
                         thumb_path = msg["thumb_path"].replace("\\", "/")
@@ -928,7 +960,7 @@ class ComWeChatChannel(SlaveChannel):
 
                     if flag:
                         if not should_send:
-                            del self.file_msg[path]
+                            self.file_msg.pop(path, None)
                             self.file_retry_at.pop(path, None)
                             self.pending_file_store.remove(path)
                             continue
@@ -952,7 +984,7 @@ class ComWeChatChannel(SlaveChannel):
                                 path,
                             )
                         else:
-                            del self.file_msg[path]
+                            self.file_msg.pop(path, None)
                             self.file_retry_at.pop(path, None)
                             self.pending_file_store.remove(path)
                             status = (
