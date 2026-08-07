@@ -42,10 +42,27 @@ def should_request_original_media(
     media_type: str,
     original_timestamp: Optional[int],
     started_at: int,
+    allow_historical: bool = False,
 ) -> bool:
     return (
         media_type == "image"
-        and not is_historical_media(original_timestamp, started_at)
+        and (
+            allow_historical
+            or not is_historical_media(original_timestamp, started_at)
+        )
+    )
+
+
+def should_use_historical_fallback(
+    media_type: str,
+    original_timestamp: Optional[int],
+    started_at: int,
+    force_original_retry: bool,
+) -> bool:
+    return (
+        media_type in ("image", "voice")
+        and is_historical_media(original_timestamp, started_at)
+        and not (media_type == "image" and force_original_retry)
     )
 
 

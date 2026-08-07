@@ -58,8 +58,10 @@ from .media_recovery import (
     media_wait_timeout,
     observe_media_file_size,
     should_request_original_media,
+    should_use_historical_fallback,
     should_use_thumbnail,
 )
+from .sent_message import should_ignore_sent_msg
 from .pending_files import (
     PendingFileStore,
     build_pending_file_record,
@@ -188,6 +190,14 @@ class ComWeChatChannel(SlaveChannel):
                 author = chat.self
 
             self.handle_msg(msg , author , chat)
+
+        @self.bot.on("sent_msg")
+        def on_sent_msg(msg: Dict):
+            if should_ignore_sent_msg(msg):
+                self.logger.debug(
+                    "忽略微信电脑端发送回环消息: msgid=%s",
+                    msg.get("msgid"),
+                )
 
         @self.bot.on("friend_msg")
         @update_contacts_wrapper
@@ -747,12 +757,20 @@ class ComWeChatChannel(SlaveChannel):
 
         try:
             original_timestamp = msg.get("timestamp")
+            force_original_historical = (
+                self.config.get("force_original_media_download", True)
+                and self.config.get(
+                    "force_original_historical_media_download",
+                    True,
+                )
+            )
             if (
                 self.config.get("force_original_media_download", True)
                 and should_request_original_media(
                     msg["type"],
                     original_timestamp,
                     self.started_at,
+                    allow_historical=force_original_historical,
                 )
             ):
                 try:
@@ -784,8 +802,12 @@ class ComWeChatChannel(SlaveChannel):
             if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
                 msg["timestamp"] = int(time.time())
                 msg["historical_media"] = (
-                    msg["type"] in ("image", "voice")
-                    and is_historical_media(original_timestamp, self.started_at)
+                    should_use_historical_fallback(
+                        msg["type"],
+                        original_timestamp,
+                        self.started_at,
+                        force_original_retry=force_original_historical,
+                    )
                 )
                 msg["filepath"] = msg["filepath"].replace("\\","/")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''

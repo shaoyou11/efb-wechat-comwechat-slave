@@ -72,6 +72,36 @@ def test_only_recent_images_and_videos_request_original_download():
     assert not MODULE.should_request_original_media("image", 100, 1000)
 
 
+def test_queued_historical_image_can_request_original_download():
+    assert MODULE.should_request_original_media(
+        "image",
+        100,
+        1000,
+        allow_historical=True,
+    )
+
+
+def test_historical_image_does_not_use_short_fallback_when_retrying_original():
+    assert not MODULE.should_use_historical_fallback(
+        "image",
+        100,
+        1000,
+        force_original_retry=True,
+    )
+    assert MODULE.should_use_historical_fallback(
+        "image",
+        100,
+        1000,
+        force_original_retry=False,
+    )
+    assert MODULE.should_use_historical_fallback(
+        "voice",
+        100,
+        1000,
+        force_original_retry=True,
+    )
+
+
 def test_downloaded_media_waits_until_size_is_stable():
     ready, size, since = MODULE.observe_media_file_size(
         current_size=1024,
