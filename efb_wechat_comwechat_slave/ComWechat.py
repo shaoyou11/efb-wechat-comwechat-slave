@@ -75,6 +75,13 @@ from rich import print as rprint
 from io import BytesIO
 from PIL import Image
 
+
+OFFLINE_LOGIN_NOTICE = (
+    "检测到微信未登录，请发送 /login 获取登录二维码，或发送 /wechat "
+    "打开微信管理"
+)
+
+
 class ComWeChatChannel(SlaveChannel):
     channel_name : str = "ComWechatChannel"
     channel_emoji : str = "💻"
@@ -574,6 +581,15 @@ class ComWeChatChannel(SlaveChannel):
         self.get_me()
         self.GetContactListBySql()
         self.GetGroupListBySql()
+        master = getattr(coordinator, "master", None)
+        cleanup = getattr(master, "cleanup_same_day_offline_notices", None)
+        if callable(cleanup):
+            try:
+                removed = cleanup()
+                if removed:
+                    self.logger.info("登录成功后清理当天微信未登录提醒: %s 条", removed)
+            except Exception as error:
+                self.logger.warning("清理当天微信未登录提醒失败: %s", error)
 
     def revoke_login_qrcodes(self, completed=False):
         if getattr(coordinator, "master", None) is None:
@@ -755,7 +771,11 @@ class ComWeChatChannel(SlaveChannel):
         except KeyError:
             author = chat.add_system_member()
 
-        if "commands" in content:
+        if content.get("message") == OFFLINE_LOGIN_NOTICE:
+            msg.commands = MessageCommands([
+                MessageCommand("关闭提醒", "__delete_message__"),
+            ])
+        elif "commands" in content:
             msg.commands = MessageCommands(content["commands"])
         if "message" in content:
             msg.text = content['message']
