@@ -773,7 +773,7 @@ class ComWeChatChannel(SlaveChannel):
 
         if content.get("message") == OFFLINE_LOGIN_NOTICE:
             msg.commands = MessageCommands([
-                MessageCommand("关闭提醒", "__delete_message__"),
+                MessageCommand("删除这条消息", "__delete_message__"),
             ])
         elif "commands" in content:
             msg.commands = MessageCommands(content["commands"])
