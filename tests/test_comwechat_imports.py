@@ -18,3 +18,27 @@ def test_comwechat_imports_group_chat_for_attachment_queueing():
         and any(alias.name == "GroupChat" for alias in node.names)
         for node in tree.body
     )
+
+
+def test_scheduler_uses_safe_post_login_sync_during_api_restart():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    comwechat = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ComWeChatChannel"
+    )
+    methods = {
+        node.name: node
+        for node in comwechat.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "_try_after_login" in methods
+    scheduler_calls = [
+        node
+        for node in ast.walk(methods["scheduled_job"])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_try_after_login"
+    ]
+    assert len(scheduler_calls) == 2
