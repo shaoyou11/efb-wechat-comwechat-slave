@@ -591,6 +591,19 @@ class ComWeChatChannel(SlaveChannel):
             except Exception as error:
                 self.logger.warning("清理当天微信未登录提醒失败: %s", error)
 
+    def _try_after_login(self, reason: str) -> bool:
+        """Keep the scheduler alive while the ComWechat API is restarting."""
+        try:
+            self.after_login()
+        except Exception as error:
+            self.logger.warning(
+                "登录后同步暂不可用（%s），下一轮继续重试: %s",
+                reason,
+                error,
+            )
+            return False
+        return True
+
     def revoke_login_qrcodes(self, completed=False):
         if getattr(coordinator, "master", None) is None:
             return 0
@@ -1076,16 +1089,16 @@ class ComWeChatChannel(SlaveChannel):
                 self.revoke_login_qrcodes(completed=logged_in)
                 auto_recovery_announced = False
                 if logged_in and self.watchdog_recovery_success_path.exists():
-                    self.after_login()
-                    auto_recovery_announced = self.announce_watchdog_recovery_success()
+                    if self._try_after_login("watchdog 恢复"):
+                        auto_recovery_announced = self.announce_watchdog_recovery_success()
                 if (
                     login_transition
                     and self.wxid is None
                     and not auto_recovery_announced
                     and not self.watchdog_recovery_success_path.exists()
                 ):
-                    self.after_login()
-                    self._send_login_confirmation("登录成功")
+                    if self._try_after_login("登录状态切换"):
+                        self._send_login_confirmation("登录成功")
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     try:
