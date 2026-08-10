@@ -54,6 +54,29 @@ def test_download_file_keeps_non_empty_response(monkeypatch):
     assert downloaded.read() == b"video-data"
 
 
+def test_download_file_validates_media_host_and_signature(monkeypatch):
+    response = Response([b"\x00\x00\x00\x18ftypisom0000"])
+    utils = _load_utils(monkeypatch, response)
+
+    downloaded = utils.download_file(
+        "https://finder.video.qq.com/video.mp4?sig=secret",
+        retry=1,
+        allowed_hosts=("qq.com",),
+        expected_kind="video",
+        require_https=True,
+    )
+    assert downloaded.read().startswith(b"\x00\x00\x00\x18ftyp")
+
+    with pytest.raises(ValueError, match="host"):
+        utils.download_file(
+            "https://example.test/video.mp4",
+            retry=1,
+            allowed_hosts=("qq.com",),
+            expected_kind="video",
+            require_https=True,
+        )
+
+
 def test_wait_for_local_file_allows_delayed_attachment(monkeypatch, tmp_path):
     utils = _load_utils(monkeypatch, Response())
     attachment = tmp_path / "delayed.dat"

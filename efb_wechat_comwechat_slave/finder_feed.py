@@ -1,8 +1,22 @@
 from dataclasses import dataclass
-from typing import Optional
-from urllib.parse import urlencode
+import re
+from typing import Dict, Optional
+from urllib.parse import urlparse, urlunparse
 
 from lxml import etree
+
+
+VIDEO_MEDIA_ALLOWED_HOSTS = (
+    "qq.com",
+    "qpic.cn",
+    "weixin.qq.com",
+)
+
+
+def _safe_text(value: str, limit: int = 2000) -> str:
+    text = str(value or "")
+    text = re.sub(r"https?://\S+", "[链接已隐藏]", text)
+    return text[:limit]
 
 
 @dataclass(frozen=True)
@@ -14,13 +28,32 @@ class FinderFeed:
     duration_seconds: Optional[int]
     object_id: str
     object_nonce_id: str
+    source_url: str = ""
 
     @property
     def share_url(self) -> str:
-        if not self.object_id or not self.object_nonce_id:
+        # The old channels.weixin.qq.com page often only displays the
+        # unsupported-version screen. Only expose a real short share URL.
+        parsed = urlparse(self.source_url or "")
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "weixin.qq.com",
+            "www.weixin.qq.com",
+        }:
             return ""
-        query = urlencode({"oid": self.object_id, "nid": self.object_nonce_id})
-        return f"https://channels.weixin.qq.com/web/pages/feed?{query}"
+        if not parsed.path.startswith("/sph/"):
+            return ""
+        return urlunparse((parsed.scheme, parsed.hostname, parsed.path, "", "", ""))
+
+    @property
+    def public_metadata(self) -> Dict[str, object]:
+        """Fields safe to attach to an EFB message and persist in mappings."""
+        return {
+            "author": _safe_text(self.author, 120),
+            "description": _safe_text(self.description),
+            "duration_seconds": self.duration_seconds,
+            "object_id": self.object_id,
+            "share_url": self.share_url,
+        }
 
 
 def _first_text(xml: etree._Element, *paths: str) -> str:
@@ -31,8 +64,21 @@ def _first_text(xml: etree._Element, *paths: str) -> str:
     return ""
 
 
+def _first_public_text(xml: etree._Element, *paths: str) -> str:
+    return _safe_text(_first_text(xml, *paths))
+
+
 def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
-    xml = etree.fromstring(xml_text.encode("utf-8"))
+    parser = etree.XMLParser(
+        load_dtd=False,
+        no_network=True,
+        resolve_entities=False,
+        recover=False,
+    )
+    try:
+        xml = etree.fromstring(xml_text.encode("utf-8"), parser=parser)
+    except (etree.XMLSyntaxError, UnicodeError, AttributeError):
+        return None
     if _first_text(xml, "/msg/appmsg/type/text()") != "51":
         return None
 
@@ -52,8 +98,8 @@ def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
         duration_seconds = None
 
     return FinderFeed(
-        author=_first_text(feed, "nickname/text()"),
-        description=_first_text(feed, "desc/text()"),
+        author=_first_public_text(feed, "nickname/text()"),
+        description=_first_public_text(feed, "desc/text()"),
         video_url=_first_text(
             feed,
             "mediaList/media[1]/url/text()",
@@ -73,4 +119,5 @@ def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
             "objectNonceId/text()",
             "object_nonce_id/text()",
         ),
+        source_url=_first_text(xml, "/msg/appmsg/url/text()"),
     )

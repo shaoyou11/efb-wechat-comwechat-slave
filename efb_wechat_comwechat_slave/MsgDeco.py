@@ -14,7 +14,11 @@ from ehforwarderbot.types import MessageID
 from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat
 from .Utils import download_file
-from .finder_feed import parse_finder_feed
+from .finder_feed import (
+    VIDEO_MEDIA_ALLOWED_HOSTS,
+    FinderFeed,
+    parse_finder_feed,
+)
 
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
 
@@ -155,14 +159,7 @@ def efb_video_wrapper(file: IO, filename: str = None, text: str = None) -> Messa
     return efb_msg
 
 
-def efb_finder_feed_wrapper(
-    xml_text: str,
-    downloader=download_file,
-) -> Message:
-    feed = parse_finder_feed(xml_text)
-    if feed is None:
-        return efb_text_simple_wrapper("无法解析微信视频号分享")
-
+def finder_feed_caption(feed: FinderFeed) -> str:
     lines = ["微信视频号分享"]
     if feed.author:
         lines.append(f"作者：{feed.author}")
@@ -172,11 +169,33 @@ def efb_finder_feed_wrapper(
         lines.append(f"时长：{feed.duration_seconds} 秒")
     if feed.share_url:
         lines.append(f"视频号页面：{feed.share_url}")
-    caption = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def efb_finder_feed_wrapper(
+    xml_text: str,
+    downloader=download_file,
+    defer_video: bool = True,
+) -> Message:
+    feed = parse_finder_feed(xml_text)
+    if feed is None:
+        return efb_text_simple_wrapper("无法解析微信视频号分享")
+
+    caption = finder_feed_caption(feed)
+
+    if defer_video:
+        message = efb_text_simple_wrapper(caption)
+        message.vendor_specific = {"finder_feed": feed.public_metadata}
+        return message
 
     if feed.video_url:
         try:
-            video = downloader(feed.video_url)
+            video = downloader(
+                feed.video_url,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                expected_kind="video",
+                require_https=True,
+            )
             return efb_video_wrapper(
                 video,
                 filename="wechat-channel.mp4",
@@ -184,17 +203,19 @@ def efb_finder_feed_wrapper(
             )
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "微信视频号视频下载失败，发送视频直链并尝试封面：%s",
-                error,
+                "微信视频号视频下载失败，尝试封面：%s",
+                type(error).__name__,
             )
 
     fallback_caption = caption
-    if feed.video_url:
-        fallback_caption = f"{caption}\n视频直链：{feed.video_url}"
-
     if feed.cover_url:
         try:
-            cover = downloader(feed.cover_url)
+            cover = downloader(
+                feed.cover_url,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                expected_kind="image",
+                require_https=True,
+            )
             return efb_image_wrapper(
                 cover,
                 filename="wechat-channel.jpg",
@@ -203,7 +224,7 @@ def efb_finder_feed_wrapper(
         except Exception as error:
             logging.getLogger(__name__).warning(
                 "微信视频号封面下载失败，降级发送文字：%s",
-                error,
+                type(error).__name__,
             )
 
     return efb_text_simple_wrapper(fallback_caption)

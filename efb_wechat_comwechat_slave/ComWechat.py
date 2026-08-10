@@ -1,4 +1,5 @@
 import logging, tempfile
+import queue
 import time
 import threading
 from lxml import etree
@@ -38,9 +39,19 @@ from ehforwarderbot.status import MessageRemoval, ChatUpdates
 
 from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat, EFBGroupMember, EFBSystemUser
-from .MsgDeco import qutoed_text
+from .MsgDeco import (
+    VIDEO_MEDIA_ALLOWED_HOSTS,
+    efb_image_wrapper,
+    efb_text_simple_wrapper,
+    efb_video_wrapper,
+    finder_feed_caption,
+    qutoed_text,
+)
 from .MsgProcess import MsgProcess, MsgWrapper
 from .Utils import download_file , load_config , load_temp_file_to_local , WC_EMOTICON_CONVERSION
+from .finder_feed import parse_finder_feed
+from .finder_feed_jobs import FinderFeedJobStore
+from .finder_resolver import resolve_feed
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
@@ -129,6 +140,30 @@ class ComWeChatChannel(SlaveChannel):
         self.file_retry_at = {}
         self.pending_file_store = PendingFileStore(
             Path(config_path).parent / "pending-files.json"
+        )
+        self.finder_feed_job_store = FinderFeedJobStore(
+            Path(os.getenv(
+                "EFB_FINDER_JOB_DB",
+                str(Path(config_path).parent / "finder-feed-jobs.db"),
+            )),
+            expiry_seconds=int(os.getenv(
+                "EFB_FINDER_JOB_EXPIRY_SECONDS",
+                self.config.get("finder_feed_job_expiry_seconds", 6 * 60 * 60),
+            )),
+        )
+        self.finder_feed_runtime = {}
+        self.finder_feed_runtime_max = max(
+            16,
+            int(os.getenv("EFB_FINDER_RUNTIME_MAX", 256)),
+        )
+        self.finder_feed_queue = queue.Queue()
+        self.finder_feed_stop_event = threading.Event()
+        self.finder_feed_worker_thread = None
+        self.finder_feed_max_bytes = max(
+            1,
+            int(self.config.get("finder_feed_max_bytes", os.getenv(
+                "EFB_FINDER_MAX_BYTES", 512 * 1024 * 1024
+            ))),
         )
         self.login_qr_store = LoginQrStore(
             Path(config_path).parent / "login-qrcodes.json"
@@ -591,6 +626,19 @@ class ComWeChatChannel(SlaveChannel):
             except Exception as error:
                 self.logger.warning("清理当天微信未登录提醒失败: %s", error)
 
+    def _try_after_login(self, reason: str) -> bool:
+        """Keep the scheduler alive while the ComWechat API is restarting."""
+        try:
+            self.after_login()
+        except Exception as error:
+            self.logger.warning(
+                "登录后同步暂不可用（%s），下一轮继续重试: %s",
+                reason,
+                error,
+            )
+            return False
+        return True
+
     def revoke_login_qrcodes(self, completed=False):
         if getattr(coordinator, "master", None) is None:
             return 0
@@ -678,6 +726,192 @@ class ComWeChatChannel(SlaveChannel):
                 if efb_msg.file:
                     efb_msg.file.close()
         return results
+
+    def _enqueue_finder_feed(self, msg, efb_msg, author, chat):
+        metadata = (getattr(efb_msg, "vendor_specific", {}) or {}).get("finder_feed")
+        if not isinstance(metadata, dict):
+            return
+        feed = parse_finder_feed(str(msg.get("message") or ""))
+        if feed is None:
+            return
+        try:
+            job_id = self.finder_feed_job_store.enqueue(
+                source_uid=str(msg["msgid"]),
+                chat_uid=str(chat.uid),
+                chat_kind="group" if isinstance(chat, GroupChat) else "private",
+                author_uid=str(getattr(author, "uid", "")),
+                object_id=feed.object_id,
+                object_nonce_id=feed.object_nonce_id,
+            )
+        except Exception:
+            self.logger.exception("创建视频号按需任务失败: msgid=%s", msg.get("msgid"))
+            return
+        while len(self.finder_feed_runtime) >= self.finder_feed_runtime_max:
+            oldest_job_id = next(iter(self.finder_feed_runtime), None)
+            if oldest_job_id is None:
+                break
+            self.finder_feed_runtime.pop(oldest_job_id, None)
+            self.finder_feed_job_store.finish(oldest_job_id, "expired", "runtime_limit")
+        self.finder_feed_runtime[job_id] = {
+            "feed": feed,
+            "chat": chat,
+            "author": author,
+            "source_uid": str(msg["msgid"]),
+        }
+        vendor_specific = dict(getattr(efb_msg, "vendor_specific", {}) or {})
+        finder_metadata = dict(metadata)
+        finder_metadata["job_id"] = job_id
+        finder_metadata["mode"] = "on_demand"
+        vendor_specific["finder_feed"] = finder_metadata
+        efb_msg.vendor_specific = vendor_specific
+
+    def request_finder_feed_video(self, job_id: str) -> str:
+        """Queue one short-lived video job after a Telegram admin click."""
+        job_id = str(job_id or "")[:64]
+        record = self.finder_feed_job_store.get(job_id)
+        if not record:
+            return "expired"
+        if record["state"] == "waiting":
+            record = self.finder_feed_job_store.request(job_id)
+            if record and record["state"] == "requested":
+                self.finder_feed_queue.put(job_id)
+                return "queued"
+        if record["state"] in {"requested", "processing"}:
+            return "already_queued"
+        if record["state"] == "sent":
+            return "sent"
+        if record["state"] == "failed":
+            return "failed"
+        return "expired"
+
+    def finder_feed_status(self) -> dict:
+        self.finder_feed_job_store.expire_stale()
+        counts = self.finder_feed_job_store.counts()
+        return {
+            "waiting": counts["waiting"],
+            "requested": counts["requested"],
+            "processing": counts["processing"],
+            "sent": counts["sent"],
+            "failed": counts["failed"],
+            "expired": counts["expired"],
+        }
+
+    def _finder_feed_message(self, kind, file, text, chat, author, source_uid, job_id):
+        if kind == "video":
+            message = efb_video_wrapper(file, filename="wechat-channel.mp4", text=text)
+        else:
+            message = efb_image_wrapper(file, filename="wechat-channel.jpg", text=text)
+        message.target = Message(uid=MessageID(source_uid), chat=chat)
+        self.send_efb_msgs(
+            message,
+            author=author,
+            chat=chat,
+            uid=MessageID(f"{source_uid}:finder:{job_id}"),
+        )
+
+    def _finder_feed_worker(self):
+        next_housekeeping = 0.0
+        while not self.finder_feed_stop_event.is_set():
+            now = time.monotonic()
+            if now >= next_housekeeping:
+                try:
+                    self.finder_feed_job_store.expire_stale()
+                    self.finder_feed_job_store.purge_old()
+                    for old_job_id in list(self.finder_feed_runtime):
+                        old_record = self.finder_feed_job_store.get(old_job_id)
+                        if not old_record or old_record["state"] in {"failed", "sent", "expired"}:
+                            self.finder_feed_runtime.pop(old_job_id, None)
+                except Exception:
+                    self.logger.exception("视频号任务清理失败")
+                next_housekeeping = now + 60
+            try:
+                job_id = self.finder_feed_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            record = self.finder_feed_job_store.claim(job_id)
+            runtime = self.finder_feed_runtime.get(job_id)
+            if not record or not runtime:
+                self.finder_feed_job_store.finish(job_id, "expired", "runtime_unavailable")
+                self.finder_feed_queue.task_done()
+                continue
+            try:
+                self._run_finder_feed_job(job_id, runtime)
+            except Exception:
+                self.logger.exception("视频号按需任务失败: job=%s", job_id)
+                self.finder_feed_job_store.finish(job_id, "failed", "worker_error")
+            finally:
+                self.finder_feed_runtime.pop(job_id, None)
+                self.finder_feed_queue.task_done()
+
+    def _run_finder_feed_job(self, job_id, runtime):
+        feed = runtime["feed"]
+        caption = finder_feed_caption(feed)
+        video_url = feed.video_url
+        cover_url = feed.cover_url
+        try:
+            video = download_file(
+                video_url,
+                retry=2,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                max_bytes=self.finder_feed_max_bytes,
+                expected_kind="video",
+                require_https=True,
+            ) if video_url else None
+        except Exception as error:
+            self.logger.warning("视频号视频直取失败: job=%s reason=%s", job_id, type(error).__name__)
+            video = None
+        if video is None:
+            resolved = resolve_feed(feed.object_id, feed.object_nonce_id)
+            if resolved:
+                try:
+                    video = download_file(
+                        resolved.get("video_url", ""),
+                        retry=1,
+                        allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                        max_bytes=self.finder_feed_max_bytes,
+                        expected_kind="video",
+                        require_https=True,
+                    ) if resolved.get("video_url") else None
+                    cover_url = cover_url or resolved.get("cover_url", "")
+                except Exception as error:
+                    self.logger.warning("视频号私有解析结果不可用: job=%s reason=%s", job_id, type(error).__name__)
+        if video is not None:
+            self._finder_feed_message(
+                "video", video, caption, runtime["chat"], runtime["author"], runtime["source_uid"], job_id
+            )
+            self.finder_feed_job_store.finish(job_id, "sent")
+            return
+
+        try:
+            cover = download_file(
+                cover_url,
+                retry=1,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                max_bytes=min(self.finder_feed_max_bytes, 32 * 1024 * 1024),
+                expected_kind="image",
+                require_https=True,
+            ) if cover_url else None
+        except Exception as error:
+            self.logger.warning("视频号封面获取失败: job=%s reason=%s", job_id, type(error).__name__)
+            cover = None
+        if cover is not None:
+            self._finder_feed_message(
+                "image", cover, f"{caption}\n\n视频暂时无法获取，已发送封面。",
+                runtime["chat"], runtime["author"], runtime["source_uid"], job_id
+            )
+            self.finder_feed_job_store.finish(job_id, "sent", "video_unavailable")
+            return
+        message = efb_text_simple_wrapper(
+            f"{caption}\n\n视频暂时无法获取，请在微信端重新转发后再试。"
+        )
+        message.target = Message(uid=MessageID(runtime["source_uid"]), chat=runtime["chat"])
+        self.send_efb_msgs(
+            message,
+            author=runtime["author"],
+            chat=runtime["chat"],
+            uid=MessageID(f"{runtime['source_uid']}:finder:{job_id}"),
+        )
+        self.finder_feed_job_store.finish(job_id, "failed", "media_unavailable")
 
     def queue_file_message(self, path, msg, author, chat):
         record = build_pending_file_record(
@@ -773,7 +1007,7 @@ class ComWeChatChannel(SlaveChannel):
 
         if content.get("message") == OFFLINE_LOGIN_NOTICE:
             msg.commands = MessageCommands([
-                MessageCommand("关闭提醒", "__delete_message__"),
+                MessageCommand("删除这条消息", "__delete_message__"),
             ])
         elif "commands" in content:
             msg.commands = MessageCommands(content["commands"])
@@ -893,7 +1127,16 @@ class ComWeChatChannel(SlaveChannel):
             self.cache[msg["msgid"]] = msg["type"]
             return
 
-        self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+        efb_msgs = MsgProcess(msg, chat)
+        message_list = [efb_msgs] if isinstance(efb_msgs, Message) else (efb_msgs or [])
+        for efb_msg in message_list:
+            self._enqueue_finder_feed(msg, efb_msg, author, chat)
+        self.send_efb_msgs(
+            MsgWrapper(msg, efb_msgs),
+            author=author,
+            chat=chat,
+            uid=MessageID(str(msg['msgid'])),
+        )
         self.cache[msg["msgid"]] = msg["type"]
 
     def handle_file_msg(self):
@@ -1076,16 +1319,16 @@ class ComWeChatChannel(SlaveChannel):
                 self.revoke_login_qrcodes(completed=logged_in)
                 auto_recovery_announced = False
                 if logged_in and self.watchdog_recovery_success_path.exists():
-                    self.after_login()
-                    auto_recovery_announced = self.announce_watchdog_recovery_success()
+                    if self._try_after_login("watchdog 恢复"):
+                        auto_recovery_announced = self.announce_watchdog_recovery_success()
                 if (
                     login_transition
                     and self.wxid is None
                     and not auto_recovery_announced
                     and not self.watchdog_recovery_success_path.exists()
                 ):
-                    self.after_login()
-                    self._send_login_confirmation("登录成功")
+                    if self._try_after_login("登录状态切换"):
+                        self._send_login_confirmation("登录成功")
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
                     try:
@@ -1417,6 +1660,13 @@ class ComWeChatChannel(SlaveChannel):
             return None
 
     def poll(self):
+        self.finder_feed_stop_event.clear()
+        self.finder_feed_worker_thread = threading.Thread(
+            target=self._finder_feed_worker,
+            name="finder-feed-worker",
+            daemon=True,
+        )
+        self.finder_feed_worker_thread.start()
         timer = threading.Thread(target = self.scheduled_job)
         timer.daemon = True
         timer.start()
@@ -1438,6 +1688,10 @@ class ComWeChatChannel(SlaveChannel):
         ...
 
     def stop_polling(self):
+        self.finder_feed_stop_event.set()
+        if self.finder_feed_worker_thread and self.finder_feed_worker_thread.is_alive():
+            self.finder_feed_worker_thread.join(timeout=5)
+        self.finder_feed_runtime.clear()
         self.db.stop_worker()
 
     def get_message_by_id(self, chat: 'Chat', msg_id: MessageID) -> Optional['Message']:
