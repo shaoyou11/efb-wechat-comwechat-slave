@@ -64,6 +64,17 @@ def test_parse_finder_feed_ignores_normal_link():
     assert parse_finder_feed("<msg><appmsg><type>5</type></appmsg></msg>") is None
 
 
+def test_parse_finder_feed_keeps_exact_public_short_link():
+    xml = FINDER_XML.replace(
+        "<url>https://support.weixin.qq.com/update/</url>",
+        "<url>https://weixin.qq.com/sph/A3ZOAAxUIJ?from=share</url>",
+    )
+
+    feed = parse_finder_feed(xml)
+
+    assert feed.share_url == "https://weixin.qq.com/sph/A3ZOAAxUIJ"
+
+
 def _load_msg_deco(monkeypatch):
     package = types.ModuleType("efb_wechat_comwechat_slave")
     package.__path__ = [str(MODULE_PATH.parent)]
@@ -219,7 +230,8 @@ def test_finder_feed_wrapper_cover_only_skips_video_and_sends_cover(monkeypatch)
     assert [item[0] for item in requested] == ["https://example.test/cover.jpg"]
     assert message.type == "image"
     assert message.filename == "wechat-channel.jpg"
-    assert "已发送封面" in message.text
+    assert "已保留封面" in message.text
+    assert message.text.startswith("【微信视频号】")
 
 
 def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):

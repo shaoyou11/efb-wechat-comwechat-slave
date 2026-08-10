@@ -160,15 +160,15 @@ def efb_video_wrapper(file: IO, filename: str = None, text: str = None) -> Messa
 
 
 def finder_feed_caption(feed: FinderFeed) -> str:
-    lines = ["微信视频号分享"]
+    lines = ["【微信视频号】"]
     if feed.author:
         lines.append(f"作者：{feed.author}")
-    if feed.description:
-        lines.append(feed.description)
     if feed.duration_seconds is not None:
         lines.append(f"时长：{feed.duration_seconds} 秒")
+    if feed.description:
+        lines.extend(["", feed.description])
     if feed.share_url:
-        lines.append(f"视频号页面：{feed.share_url}")
+        lines.extend(["", f"打开视频号：{feed.share_url}"])
     return "\n".join(lines)
 
 
@@ -214,7 +214,7 @@ def efb_finder_feed_wrapper(
 
     fallback_caption = caption
     if cover_only:
-        fallback_caption += "\n\n视频原片暂不自动获取，已发送封面。"
+        fallback_caption += "\n\n原视频暂不能直接提取，已保留封面。"
     if feed.cover_url:
         try:
             cover = downloader(

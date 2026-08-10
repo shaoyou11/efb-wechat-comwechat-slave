@@ -81,6 +81,7 @@ from .pending_files import (
 )
 from .login_qr import LoginQrStore, select_revoke_uids
 from .member_avatar_marker import MemberAvatarMarkerStore
+from .session_events import SessionEventStore
 
 from rich.console import Console
 from rich import print as rprint
@@ -168,6 +169,9 @@ class ComWeChatChannel(SlaveChannel):
         )
         self.login_qr_store = LoginQrStore(
             Path(config_path).parent / "login-qrcodes.json"
+        )
+        self.session_events = SessionEventStore(
+            Path(config_path).parent / "session-events.json"
         )
         self.member_avatar_markers = MemberAvatarMarkerStore(
             Path(config_path).parent / "member-avatar-markers.json",
@@ -528,6 +532,8 @@ class ComWeChatChannel(SlaveChannel):
         )
         has_pending_qr = bool(self.login_qr_store.records())
         if self.is_login():
+            if has_pending_qr:
+                self.session_events.record(True)
             self.after_login()
             auto_recovery = self.announce_watchdog_recovery_success()
             if auto_recovery:
@@ -621,6 +627,7 @@ class ComWeChatChannel(SlaveChannel):
             return bool(text)
 
     def after_login(self):
+        self.session_events.observe(True)
         self.revoke_login_qrcodes(completed=True)
         self.get_me()
         self.GetContactListBySql()
@@ -716,6 +723,7 @@ class ComWeChatChannel(SlaveChannel):
             return "退出失败，原因: %s" % res
         else:
             self.wxid = None
+            self.session_events.record(False)
             return "退出成功"
 
     @staticmethod
@@ -1322,6 +1330,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
+                self.session_events.observe(logged_in)
                 login_transition = offline_notification.observe_login_transition(
                     logged_in
                 )

@@ -11,6 +11,9 @@ VIDEO_MEDIA_ALLOWED_HOSTS = (
     "qpic.cn",
     "weixin.qq.com",
 )
+SHARE_URL_PATTERN = re.compile(
+    r"https://(?:www\.)?weixin\.qq\.com/sph/[A-Za-z0-9_-]+"
+)
 
 
 def _safe_text(value: str, limit: int = 2000) -> str:
@@ -68,6 +71,14 @@ def _first_public_text(xml: etree._Element, *paths: str) -> str:
     return _safe_text(_first_text(xml, *paths))
 
 
+def _find_share_url(xml: etree._Element) -> str:
+    for value in xml.xpath("//text()"):
+        match = SHARE_URL_PATTERN.search(str(value or ""))
+        if match:
+            return match.group(0)
+    return ""
+
+
 def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
     parser = etree.XMLParser(
         load_dtd=False,
@@ -119,5 +130,5 @@ def parse_finder_feed(xml_text: str) -> Optional[FinderFeed]:
             "objectNonceId/text()",
             "object_nonce_id/text()",
         ),
-        source_url=_first_text(xml, "/msg/appmsg/url/text()"),
+        source_url=_find_share_url(xml),
     )
