@@ -51,6 +51,7 @@ from .MsgProcess import MsgProcess, MsgWrapper
 from .Utils import download_file , load_config , load_temp_file_to_local , WC_EMOTICON_CONVERSION
 from .finder_feed import parse_finder_feed
 from .finder_feed_jobs import FinderFeedJobStore
+from .wechat_recall import build_wechat_recall_metadata
 from .finder_resolver import resolve_feed
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
@@ -323,7 +324,15 @@ class ComWeChatChannel(SlaveChannel):
 
             newmsgid = re.search("<newmsgid>(.*?)<\/newmsgid>", msg["message"]).group(1)
 
-            efb_msg = Message(chat = chat , uid = newmsgid)
+            efb_msg = Message(
+                chat=chat,
+                uid=newmsgid,
+                vendor_specific={
+                    "wechat_recall": build_wechat_recall_metadata(
+                        msg, getattr(self, "wxid", "")
+                    ),
+                },
+            )
             coordinator.send_status(
                 MessageRemoval(source_channel=self, destination_channel=coordinator.master, message=efb_msg)
             )

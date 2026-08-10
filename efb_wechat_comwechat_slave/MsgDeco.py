@@ -176,6 +176,7 @@ def efb_finder_feed_wrapper(
     xml_text: str,
     downloader=download_file,
     defer_video: bool = True,
+    cover_only: bool = False,
 ) -> Message:
     feed = parse_finder_feed(xml_text)
     if feed is None:
@@ -188,7 +189,11 @@ def efb_finder_feed_wrapper(
         message.vendor_specific = {"finder_feed": feed.public_metadata}
         return message
 
-    if feed.video_url:
+    # Video-channel URLs are short-lived and the current ComWechat version
+    # cannot reliably retrieve the original video.  Keep the legacy path
+    # available for tests and controlled callers, but production can request
+    # a cover-only conversion so the share remains useful and predictable.
+    if feed.video_url and not cover_only:
         try:
             video = downloader(
                 feed.video_url,
@@ -208,6 +213,8 @@ def efb_finder_feed_wrapper(
             )
 
     fallback_caption = caption
+    if cover_only:
+        fallback_caption += "\n\n视频原片暂不自动获取，已发送封面。"
     if feed.cover_url:
         try:
             cover = downloader(
@@ -516,7 +523,10 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                 vendor_specific={ "is_forwarded": True }
             )
         elif type == 51: # 视频（微信视频号分享）
-            return efb_finder_feed_wrapper(text)
+            # Direct video URLs are usually expired or version-gated.  Send
+            # the safe cover image immediately instead of exposing a button
+            # that starts a second, unreliable download attempt.
+            return efb_finder_feed_wrapper(text, defer_video=False, cover_only=True)
         elif type == 57: # 引用（回复）消息
             msg = xml.xpath('/msg/appmsg/title/text()')[0]
             refer_msgType = int(xml.xpath('/msg/appmsg/refermsg/type/text()')[0]) # 被引用消息类型

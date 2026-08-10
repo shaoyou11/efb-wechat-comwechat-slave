@@ -201,6 +201,27 @@ def test_finder_feed_wrapper_legacy_mode_uses_safe_media_options(monkeypatch):
     assert "example.test" not in requested[0][1]["allowed_hosts"]
 
 
+def test_finder_feed_wrapper_cover_only_skips_video_and_sends_cover(monkeypatch):
+    msg_deco = _load_msg_deco(monkeypatch)
+    requested = []
+
+    def downloader(url, **kwargs):
+        requested.append((url, kwargs))
+        return _temp_media(".jpg")
+
+    message = msg_deco.efb_finder_feed_wrapper(
+        FINDER_XML,
+        downloader=downloader,
+        defer_video=False,
+        cover_only=True,
+    )
+
+    assert [item[0] for item in requested] == ["https://example.test/cover.jpg"]
+    assert message.type == "image"
+    assert message.filename == "wechat-channel.jpg"
+    assert "已发送封面" in message.text
+
+
 def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
 
