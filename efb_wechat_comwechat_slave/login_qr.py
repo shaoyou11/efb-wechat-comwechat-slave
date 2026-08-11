@@ -15,6 +15,28 @@ def select_revoke_uids(records, now, ttl_seconds, completed):
     return selected
 
 
+def has_active_qr(records, now, ttl_seconds):
+    for record in records:
+        try:
+            created_at = int(record.get("created_at", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if now - created_at < ttl_seconds:
+            return True
+    return False
+
+
+def has_recent_qr(records, now, grace_seconds):
+    for record in records:
+        try:
+            created_at = int(record.get("created_at", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if now - created_at < grace_seconds:
+            return True
+    return False
+
+
 class LoginQrStore:
     def __init__(self, path):
         self.path = Path(path)
