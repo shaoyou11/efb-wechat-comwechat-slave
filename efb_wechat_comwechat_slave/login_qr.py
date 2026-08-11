@@ -15,24 +15,38 @@ def select_revoke_uids(records, now, ttl_seconds, completed):
     return selected
 
 
-def has_active_qr(records, now, ttl_seconds):
+def _matches_stack_generation(record, stack_generation):
+    if stack_generation is None:
+        return True
+    return str(record.get("stack_generation", "")).strip() == str(
+        stack_generation
+    ).strip()
+
+
+def has_active_qr(records, now, ttl_seconds, stack_generation=None):
     for record in records:
         try:
             created_at = int(record.get("created_at", 0))
         except (AttributeError, TypeError, ValueError):
             continue
-        if now - created_at < ttl_seconds:
+        if (
+            _matches_stack_generation(record, stack_generation)
+            and now - created_at < ttl_seconds
+        ):
             return True
     return False
 
 
-def has_recent_qr(records, now, grace_seconds):
+def has_recent_qr(records, now, grace_seconds, stack_generation=None):
     for record in records:
         try:
             created_at = int(record.get("created_at", 0))
         except (AttributeError, TypeError, ValueError):
             continue
-        if now - created_at < grace_seconds:
+        if (
+            _matches_stack_generation(record, stack_generation)
+            and now - created_at < grace_seconds
+        ):
             return True
     return False
 
@@ -59,7 +73,13 @@ class LoginQrStore:
             except (TypeError, ValueError):
                 continue
             if uid:
-                records.append({"uid": uid, "created_at": created_at})
+                normalized = {"uid": uid, "created_at": created_at}
+                stack_generation = str(
+                    record.get("stack_generation", "")
+                ).strip()
+                if stack_generation:
+                    normalized["stack_generation"] = stack_generation
+                records.append(normalized)
         return records
 
     def _save(self, records):
@@ -75,11 +95,15 @@ class LoginQrStore:
         with self.lock:
             return self._load()
 
-    def add(self, uid, created_at):
+    def add(self, uid, created_at, stack_generation=None):
         uid = str(uid)
         with self.lock:
             records = [record for record in self._load() if record["uid"] != uid]
-            records.append({"uid": uid, "created_at": int(created_at)})
+            record = {"uid": uid, "created_at": int(created_at)}
+            stack_generation = str(stack_generation or "").strip()
+            if stack_generation:
+                record["stack_generation"] = stack_generation
+            records.append(record)
             self._save(records)
 
     def remove(self, uid):
