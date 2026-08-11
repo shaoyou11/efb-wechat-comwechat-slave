@@ -58,7 +58,11 @@ from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
-from .login_confirmation import LoginConfirmation, login_confirmation_message
+from .login_confirmation import (
+    LoginConfirmation,
+    login_confirmation_message,
+    stable_login_state,
+)
 from .contact_display import (
     extract_mentioned_alias,
     resolve_contact_name,
@@ -515,6 +519,21 @@ class ComWeChatChannel(SlaveChannel):
         except:
             return False
 
+    def is_login_stable(self) -> bool:
+        try:
+            probes = max(1, int(os.getenv("COMWECHAT_LOGIN_CONFIRM_PROBES", "3")))
+            interval = max(
+                0.0,
+                float(os.getenv("COMWECHAT_LOGIN_CONFIRM_INTERVAL_SECONDS", "2")),
+            )
+        except (TypeError, ValueError):
+            probes, interval = 3, 2.0
+        return stable_login_state(
+            self.is_login,
+            probes=probes,
+            interval_seconds=interval,
+        )
+
     def get_qrcode(self):
         result = self.bot.GetQrcodeImage()
         
@@ -568,7 +587,7 @@ class ComWeChatChannel(SlaveChannel):
             uid=MessageID(str(int(time.time()))),
         )
         has_pending_qr = bool(self.login_qr_store.records())
-        if self.is_login():
+        if self.is_login_stable():
             if has_pending_qr:
                 self.session_events.record(True)
             self.after_login()
@@ -766,7 +785,7 @@ class ComWeChatChannel(SlaveChannel):
                 stack_generation=stack_generation,
             ):
                 return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
-            if self.is_login():
+            if self.is_login_stable():
                 self.after_login()
                 return "微信当前已登录，无需重新扫码"
 
@@ -777,7 +796,7 @@ class ComWeChatChannel(SlaveChannel):
                 return "微信服务正在恢复，原二维码未删除，请稍后再发送 /login"
 
             if not file:
-                if self.is_login():
+                if self.is_login_stable():
                     self.after_login()
                     return "登录成功"
                 return "暂未取得登录二维码，原二维码未删除，请稍后再试"
@@ -1451,6 +1470,10 @@ class ComWeChatChannel(SlaveChannel):
                 if logged_in and qr_transition_pending:
                     self.logger.info("登录二维码切换期内忽略瞬时登录状态")
                     logged_in = False
+                elif logged_in:
+                    logged_in = self.is_login_stable()
+                    if not logged_in:
+                        self.logger.warning("登录状态未连续通过校验，暂不发送成功通知")
                 self.session_events.observe(logged_in)
                 login_transition = offline_notification.observe_login_transition(
                     logged_in
@@ -1500,7 +1523,7 @@ class ComWeChatChannel(SlaveChannel):
             pass     # todo
 
         if self.wxid is None:
-            if self.is_login():
+            if self.is_login_stable():
                 self.after_login()
             else:
                 content = {

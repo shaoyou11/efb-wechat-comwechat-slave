@@ -1,5 +1,21 @@
 import threading
+import time
 from typing import Callable, Optional
+
+
+def stable_login_state(
+    check: Callable[[], bool],
+    probes: int = 3,
+    interval_seconds: float = 2,
+) -> bool:
+    """Reject a momentary API login value before success is announced."""
+    probes = max(1, int(probes))
+    for index in range(probes):
+        if not check():
+            return False
+        if index + 1 < probes:
+            time.sleep(max(0, interval_seconds))
+    return True
 
 
 def login_confirmation_message(
