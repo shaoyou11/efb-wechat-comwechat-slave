@@ -97,6 +97,8 @@ dir: "/comwechat/Files/"
 qrcode_timeout: 10
 login_qrcode_ttl_seconds: 180
 login_qrcode_login_grace_seconds: 30
+bridge_health_url: "http://127.0.0.1:19088/healthz"
+bridge_health_timeout_seconds: 2
 force_original_media_download: true
 force_original_historical_media_download: true
 member_avatar_markers: true
@@ -108,13 +110,15 @@ member_avatar_markers: true
 | `qrcode_timeout` | 获取二维码接口的等待时间。 |
 | `login_qrcode_ttl_seconds` | 登录二维码在 Telegram 中的最长保留秒数，默认 180 秒。 |
 | `login_qrcode_login_grace_seconds` | 获取二维码后忽略微信接口瞬时“已登录”状态的秒数，默认 30 秒，避免二维码被提前收回。 |
+| `bridge_health_url` | ComWechat Bridge 健康接口，用于识别微信栈是否重启，默认 `http://127.0.0.1:19088/healthz`。 |
+| `bridge_health_timeout_seconds` | 读取微信栈代次的超时时间，默认 2 秒。 |
 | `force_original_media_download` | 是否主动请求图片原文件，默认开启。 |
 | `force_original_historical_media_download` | 是否对 Bridge 队列中的历史图片重新请求原文件，默认开启。 |
 | `member_avatar_markers` | 是否显示群成员头像主色标记，默认开启；状态持久保存在 `member-avatar-markers.json`。 |
 
 实际微信文件目录必须同时挂载到 ComWechat 容器和 EFB 容器。账号、密码、Token 和真实部署路径不得提交到公开仓库。
 
-同一张登录二维码仍在有效期内时，重复执行 `/login` 不会重新请求微信接口，也不会删除上一张二维码。只有确认登录成功或二维码超时后，系统才会收回对应消息。
+同一微信栈中生成的登录二维码仍在有效期内时，重复执行 `/login` 不会重新请求微信接口。若扫码失败后微信主进程和 Bridge 已恢复重建，旧二维码会按微信栈代次判定为失效；系统在新 Bridge 就绪后生成新二维码，发送成功后再收回旧消息。二维码生成期间若恰好发生恢复，本次结果不会发送到 Telegram。
 
 ## 数据边界
 

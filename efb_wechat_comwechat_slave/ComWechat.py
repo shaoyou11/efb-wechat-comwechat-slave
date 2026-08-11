@@ -8,6 +8,7 @@ from pydub import AudioSegment
 import os
 import base64
 from pathlib import Path
+from urllib import request as urlrequest
 from xml.sax.saxutils import escape
 
 import re
@@ -187,6 +188,17 @@ class ComWeChatChannel(SlaveChannel):
         )
         self.login_qr_login_grace_seconds = max(
             10, int(self.config.get("login_qrcode_login_grace_seconds", 30))
+        )
+        self.bridge_health_url = str(self.config.get(
+            "bridge_health_url",
+            os.getenv(
+                "COMWECHAT_BRIDGE_HEALTH_URL",
+                "http://127.0.0.1:19088/healthz",
+            ),
+        ))
+        self.bridge_health_timeout_seconds = max(
+            0.2,
+            float(self.config.get("bridge_health_timeout_seconds", 2)),
         )
         self.login_qr_lock = threading.RLock()
         self.login_qr_in_progress = threading.Event()
@@ -513,6 +525,22 @@ class ComWeChatChannel(SlaveChannel):
         except Exception:
             return self.save_qr_code(result)
 
+    def get_bridge_stack_generation(self):
+        req = urlrequest.Request(self.bridge_health_url, method="GET")
+        with urlrequest.urlopen(
+            req,
+            timeout=self.bridge_health_timeout_seconds,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        generation = str(payload.get("stack_generation", "")).strip()
+        if (
+            not payload.get("ok")
+            or not payload.get("hooks_ready")
+            or not generation
+        ):
+            raise RuntimeError("Bridge 尚未完成微信栈初始化")
+        return generation
+
     @staticmethod
     def save_qr_code(qr_code):
         # 创建临时文件保存二维码图片
@@ -664,16 +692,21 @@ class ComWeChatChannel(SlaveChannel):
             return False
         return True
 
-    def revoke_login_qrcodes(self, completed=False):
+    def revoke_login_qrcodes(self, completed=False, target_uids=None):
         if getattr(coordinator, "master", None) is None:
             return 0
         with self.login_qr_lock:
-            uids = select_revoke_uids(
-                self.login_qr_store.records(),
-                now=int(time.time()),
-                ttl_seconds=self.login_qr_ttl_seconds,
-                completed=completed,
-            )
+            records = self.login_qr_store.records()
+            if target_uids is None:
+                uids = select_revoke_uids(
+                    records,
+                    now=int(time.time()),
+                    ttl_seconds=self.login_qr_ttl_seconds,
+                    completed=completed,
+                )
+            else:
+                known_uids = {str(record.get("uid", "")) for record in records}
+                uids = [str(uid) for uid in target_uids if str(uid) in known_uids]
             removed = 0
             for uid in uids:
                 message = Message(
@@ -700,11 +733,18 @@ class ComWeChatChannel(SlaveChannel):
     @efb_utils.extra(name="重新扫码登录",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
+        try:
+            stack_generation = self.get_bridge_stack_generation()
+        except Exception as error:
+            self.logger.warning("读取微信栈代次失败: %s", error)
+            return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
+
         now = int(time.time())
         if has_active_qr(
             self.login_qr_store.records(),
             now=now,
             ttl_seconds=self.login_qr_ttl_seconds,
+            stack_generation=stack_generation,
         ):
             return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
 
@@ -713,11 +753,17 @@ class ComWeChatChannel(SlaveChannel):
 
         self.login_qr_in_progress.set()
         try:
+            try:
+                stack_generation = self.get_bridge_stack_generation()
+            except Exception as error:
+                self.logger.warning("生成二维码前微信栈尚未就绪: %s", error)
+                return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
             now = int(time.time())
             if has_active_qr(
                 self.login_qr_store.records(),
                 now=now,
                 ttl_seconds=self.login_qr_ttl_seconds,
+                stack_generation=stack_generation,
             ):
                 return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
             if self.is_login():
@@ -736,6 +782,24 @@ class ComWeChatChannel(SlaveChannel):
                     return "登录成功"
                 return "暂未取得登录二维码，原二维码未删除，请稍后再试"
 
+            try:
+                generation_after_qr = self.get_bridge_stack_generation()
+            except Exception as error:
+                self.logger.warning("二维码生成后微信栈进入恢复: %s", error)
+                return "生成二维码时微信客户端发生恢复，请稍后重新发送 /login"
+            if generation_after_qr != stack_generation:
+                self.logger.warning(
+                    "二维码生成期间微信栈代次变化: %s -> %s",
+                    stack_generation,
+                    generation_after_qr,
+                )
+                return "生成二维码时微信客户端已经重启，请重新发送 /login"
+
+            previous_uids = [
+                record.get("uid")
+                for record in self.login_qr_store.records()
+                if record.get("uid")
+            ]
             msg = Message(
                 type=MsgType.Image,
                 uid=MessageID(f"login-qr-{time.time_ns()}"),
@@ -752,7 +816,12 @@ class ComWeChatChannel(SlaveChannel):
             except Exception as error:
                 self.logger.warning("发送登录二维码失败: %s", error)
                 return "二维码已生成但发送失败，原二维码未删除，请稍后再试"
-            self.login_qr_store.add(msg.uid, created_at=int(time.time()))
+            self.login_qr_store.add(
+                msg.uid,
+                created_at=int(time.time()),
+                stack_generation=stack_generation,
+            )
+            self.revoke_login_qrcodes(target_uids=previous_uids)
             self.revoke_login_qrcodes(completed=False)
             return "请扫描二维码登录；二维码有效期内请勿重复发送 /login"
         finally:
