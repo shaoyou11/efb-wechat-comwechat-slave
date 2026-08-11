@@ -14,6 +14,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 LoginConfirmation = MODULE.LoginConfirmation
 login_confirmation_message = MODULE.login_confirmation_message
+stable_login_state = MODULE.stable_login_state
 
 
 def test_concurrent_login_callbacks_confirm_only_once():
@@ -59,3 +60,19 @@ def test_watchdog_recovery_announces_login_without_qr():
         )
         == "登录成功"
     )
+
+
+def test_stable_login_requires_all_probes(monkeypatch):
+    results = iter([True, True, True])
+    sleeps = []
+    monkeypatch.setattr(MODULE.time, "sleep", sleeps.append)
+
+    assert stable_login_state(lambda: next(results), probes=3, interval_seconds=2)
+    assert sleeps == [2, 2]
+
+
+def test_stable_login_rejects_transient_success(monkeypatch):
+    results = iter([True, False, True])
+    monkeypatch.setattr(MODULE.time, "sleep", lambda _seconds: None)
+
+    assert not stable_login_state(lambda: next(results), probes=3, interval_seconds=2)
