@@ -79,7 +79,12 @@ from .pending_files import (
     build_pending_file_record,
     delivery_confirmed,
 )
-from .login_qr import LoginQrStore, select_revoke_uids
+from .login_qr import (
+    LoginQrStore,
+    has_active_qr,
+    has_recent_qr,
+    select_revoke_uids,
+)
 from .member_avatar_marker import MemberAvatarMarkerStore
 from .session_events import SessionEventStore
 
@@ -180,7 +185,11 @@ class ComWeChatChannel(SlaveChannel):
         self.login_qr_ttl_seconds = max(
             30, int(self.config.get("login_qrcode_ttl_seconds", 180))
         )
+        self.login_qr_login_grace_seconds = max(
+            10, int(self.config.get("login_qrcode_login_grace_seconds", 30))
+        )
         self.login_qr_lock = threading.RLock()
+        self.login_qr_in_progress = threading.Event()
         self.watchdog_recovery_success_path = Path(
             os.getenv(
                 "WATCHDOG_RECOVERY_SUCCESS_PATH",
@@ -691,29 +700,64 @@ class ComWeChatChannel(SlaveChannel):
     @efb_utils.extra(name="重新扫码登录",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
-        self.revoke_login_qrcodes(completed=True)
-        file = self.get_qrcode()
-        chat = self.user_auth_chat
-        author = self.user_auth_chat.other
-        msg = Message(
-            type=MsgType.Text,
-            uid=MessageID(f"login-qr-{time.time_ns()}"),
-        )
+        now = int(time.time())
+        if has_active_qr(
+            self.login_qr_store.records(),
+            now=now,
+            ttl_seconds=self.login_qr_ttl_seconds,
+        ):
+            return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
 
-        if not file:
+        if not self.login_qr_lock.acquire(blocking=False):
+            return "登录二维码正在生成，请稍候，不要重复发送 /login"
+
+        self.login_qr_in_progress.set()
+        try:
+            now = int(time.time())
+            if has_active_qr(
+                self.login_qr_store.records(),
+                now=now,
+                ttl_seconds=self.login_qr_ttl_seconds,
+            ):
+                return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
             if self.is_login():
                 self.after_login()
-                return "登录成功"
-            else:
-                return "获取二维码失败，请稍后再试"
-        else:
-            msg.type = MsgType.Image
+                return "微信当前已登录，无需重新扫码"
+
+            try:
+                file = self.get_qrcode()
+            except Exception as error:
+                self.logger.warning("获取登录二维码时微信接口暂不可用: %s", error)
+                return "微信服务正在恢复，原二维码未删除，请稍后再发送 /login"
+
+            if not file:
+                if self.is_login():
+                    self.after_login()
+                    return "登录成功"
+                return "暂未取得登录二维码，原二维码未删除，请稍后再试"
+
+            msg = Message(
+                type=MsgType.Image,
+                uid=MessageID(f"login-qr-{time.time_ns()}"),
+            )
             msg.path = Path(file.name)
             msg.file = file
             msg.mime = 'image/png'
-            self.send_efb_msgs(msg, chat=chat, author=author)
+            try:
+                self.send_efb_msgs(
+                    msg,
+                    chat=self.user_auth_chat,
+                    author=self.user_auth_chat.other,
+                )
+            except Exception as error:
+                self.logger.warning("发送登录二维码失败: %s", error)
+                return "二维码已生成但发送失败，原二维码未删除，请稍后再试"
             self.login_qr_store.add(msg.uid, created_at=int(time.time()))
-        return "请扫描二维码登录"
+            self.revoke_login_qrcodes(completed=False)
+            return "请扫描二维码登录；二维码有效期内请勿重复发送 /login"
+        finally:
+            self.login_qr_in_progress.clear()
+            self.login_qr_lock.release()
 
     @efb_utils.extra(name="强制退出微信",
            desc="强制退出")
@@ -1330,6 +1374,14 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
+                qr_transition_pending = self.login_qr_in_progress.is_set() or has_recent_qr(
+                    self.login_qr_store.records(),
+                    now=int(time.time()),
+                    grace_seconds=self.login_qr_login_grace_seconds,
+                )
+                if logged_in and qr_transition_pending:
+                    self.logger.info("登录二维码切换期内忽略瞬时登录状态")
+                    logged_in = False
                 self.session_events.observe(logged_in)
                 login_transition = offline_notification.observe_login_transition(
                     logged_in
