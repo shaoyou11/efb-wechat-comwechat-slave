@@ -20,7 +20,7 @@ def test_comwechat_imports_group_chat_for_attachment_queueing():
     )
 
 
-def test_scheduler_uses_safe_post_login_sync_during_api_restart():
+def test_scheduler_serializes_post_login_confirmation():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     comwechat = next(
         node
@@ -33,12 +33,11 @@ def test_scheduler_uses_safe_post_login_sync_during_api_restart():
         if isinstance(node, ast.FunctionDef)
     }
 
-    assert "_try_after_login" in methods
     scheduler_calls = [
         node
         for node in ast.walk(methods["scheduled_job"])
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_try_after_login"
+        and node.func.attr == "confirm_login"
     ]
-    assert len(scheduler_calls) == 2
+    assert len(scheduler_calls) == 1

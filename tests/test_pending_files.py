@@ -147,3 +147,28 @@ def test_pending_file_can_be_removed_without_deleting_media():
     assert "/data/photo.jpg" not in channel.file_msg
     assert channel.file_retry_at == {}
     assert store.removed == ["/data/photo.jpg"]
+
+
+def test_media_path_state_rejects_directory_and_empty_file(tmp_path):
+    directory = tmp_path / "attachment-root"
+    directory.mkdir()
+    empty = tmp_path / "empty.jpg"
+    empty.touch()
+    ready = tmp_path / "ready.jpg"
+    ready.write_bytes(b"image")
+
+    assert MODULE.media_path_state(str(directory)) == "invalid"
+    assert MODULE.media_path_state(str(empty)) == "empty"
+    assert MODULE.media_path_state(str(ready)) == "ready"
+    assert MODULE.media_path_state(str(tmp_path / "missing")) == "missing"
+
+
+def test_pending_directory_cannot_be_forced_into_delivery(tmp_path):
+    ComWeChatChannel = _channel_class()
+    channel = ComWeChatChannel.__new__(ComWeChatChannel)
+    channel.file_msg = {
+        str(tmp_path): ({"type": "image"}, object(), object())
+    }
+    channel.file_retry_at = {}
+
+    assert channel.request_pending_file_delivery(str(tmp_path)) == "not_ready"

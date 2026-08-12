@@ -14,12 +14,40 @@ SPEC = importlib.util.spec_from_file_location("login_qr", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 LoginQrStore = MODULE.LoginQrStore
+ManualLoginSessionStore = MODULE.ManualLoginSessionStore
+active_qr_expiry = MODULE.active_qr_expiry
 has_active_qr = MODULE.has_active_qr
 has_recent_qr = MODULE.has_recent_qr
 select_revoke_uids = MODULE.select_revoke_uids
 
 
 class LoginQrStoreTests(unittest.TestCase):
+    def test_active_qr_expiry_does_not_extend_when_reused(self):
+        records = [{"uid": "qr", "created_at": 100, "stack_generation": "a"}]
+
+        self.assertEqual(
+            active_qr_expiry(
+                records,
+                now=150,
+                ttl_seconds=180,
+                grace_seconds=60,
+                stack_generation="a",
+            ),
+            340,
+        )
+
+    def test_manual_login_session_persists_and_expires(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "manual-login-session.json"
+            store = ManualLoginSessionStore(path)
+            store.start(200, stack_generation="stack-a", now=100)
+
+            restored = ManualLoginSessionStore(path)
+            self.assertTrue(restored.active(now=199))
+            self.assertEqual(restored.snapshot(now=199)["stack_generation"], "stack-a")
+            self.assertFalse(restored.active(now=200))
+            self.assertFalse(path.exists())
+
     def test_persists_and_removes_qr_message_ids(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "login-qrcodes.json"
@@ -115,6 +143,12 @@ class LoginQrStoreTests(unittest.TestCase):
             channel.login_qr_ttl_seconds = 180
             channel.login_qr_lock = threading.RLock()
             channel.login_qr_in_progress = threading.Event()
+            channel.login_qr_session_grace_seconds = 60
+            channel.login_qr_failure_grace_seconds = 45
+            channel.manual_login_session = ManualLoginSessionStore(
+                Path(directory) / "manual-login-session.json"
+            )
+            channel.session_events = mock.Mock()
             channel.get_bridge_stack_generation = mock.Mock(return_value="stack-a")
             channel.get_qrcode = mock.Mock()
 
@@ -126,6 +160,7 @@ class LoginQrStoreTests(unittest.TestCase):
 
             self.assertIn("上一张", result)
             channel.get_qrcode.assert_not_called()
+            self.assertTrue(channel.manual_login_session.active(now=200))
 
     def test_reauth_failure_keeps_existing_expired_qr_record(self):
         with TemporaryDirectory() as directory:
@@ -137,6 +172,11 @@ class LoginQrStoreTests(unittest.TestCase):
             channel.login_qr_ttl_seconds = 180
             channel.login_qr_lock = threading.RLock()
             channel.login_qr_in_progress = threading.Event()
+            channel.login_qr_session_grace_seconds = 60
+            channel.manual_login_session = ManualLoginSessionStore(
+                Path(directory) / "manual-login-session.json"
+            )
+            channel.session_events = mock.Mock()
             channel.logger = mock.Mock()
             channel.get_bridge_stack_generation = mock.Mock(return_value="stack-a")
             channel.is_login = mock.Mock(return_value=False)
@@ -153,6 +193,8 @@ class LoginQrStoreTests(unittest.TestCase):
                 channel.login_qr_store.records(),
                 [{"uid": "existing", "created_at": 10}],
             )
+            self.assertTrue(channel.manual_login_session.active(now=244))
+            self.assertFalse(channel.manual_login_session.active(now=245))
 
     def test_reauth_reports_bridge_recovery_before_reusing_qr(self):
         channel = ComWeChatChannel.__new__(ComWeChatChannel)
@@ -175,6 +217,11 @@ class LoginQrStoreTests(unittest.TestCase):
             channel.login_qr_ttl_seconds = 180
             channel.login_qr_lock = threading.RLock()
             channel.login_qr_in_progress = threading.Event()
+            channel.login_qr_session_grace_seconds = 60
+            channel.manual_login_session = ManualLoginSessionStore(
+                Path(directory) / "manual-login-session.json"
+            )
+            channel.session_events = mock.Mock()
             channel.logger = mock.Mock()
             channel.get_bridge_stack_generation = mock.Mock(
                 side_effect=["stack-a", "stack-a", "stack-b"]
