@@ -1617,12 +1617,16 @@ class ComWeChatChannel(SlaveChannel):
 
                 self.session_events.observe(False)
                 self.revoke_login_qrcodes(completed=False)
+                recovery_event = offline_notification.observe_recovery_event(logged_in)
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
-                    try:
-                        notify_watchdog()
-                    except Exception as error:
-                        self.logger.warning("Unable to trigger login watchdog: %s", error)
+                    if recovery_event:
+                        try:
+                            notify_watchdog()
+                        except Exception as error:
+                            self.logger.warning(
+                                "Unable to trigger login watchdog: %s", error
+                            )
                     self.system_msg(content)
 
     #获取全部联系人
