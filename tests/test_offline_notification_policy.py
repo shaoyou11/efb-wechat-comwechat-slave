@@ -60,3 +60,27 @@ def test_online_to_offline_does_not_report_as_login_transition():
 
     policy.observe_login_transition(logged_in=True)
     assert policy.observe_login_transition(logged_in=False) is False
+
+
+def test_first_offline_observation_starts_one_recovery_episode():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+
+    assert policy.observe_recovery_event(logged_in=False) is True
+    assert policy.observe_recovery_event(logged_in=False) is False
+
+
+def test_reminder_interval_does_not_start_another_recovery_episode():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+    policy.observe_recovery_event(logged_in=False)
+    policy.observe(logged_in=False, now=100.0)
+
+    assert policy.observe(logged_in=False, now=100.0 + 8 * 60 * 60) is True
+    assert policy.observe_recovery_event(logged_in=False) is False
+
+
+def test_online_transition_rearms_the_next_offline_episode():
+    policy = OfflineNotificationPolicy(interval_seconds=8 * 60 * 60)
+    policy.observe_recovery_event(logged_in=False)
+    policy.observe_recovery_event(logged_in=True)
+
+    assert policy.observe_recovery_event(logged_in=False) is True
