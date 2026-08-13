@@ -27,6 +27,7 @@ def MsgWrapper(msg, efb_msgs:  Union[Message, List[Message]]):
         for key in ("type", "msgid", "sender", "self", "timestamp")
         if msg.get(key) is not None
     }
+    bridge_trace_id = str(msg.get("_bridge_trace_id") or "").strip()
     for efb_msg in efb_msgs:
         vendor_specific = dict(getattr(efb_msg, "vendor_specific", {}) or {})
         if not finder_feed:
@@ -34,6 +35,8 @@ def MsgWrapper(msg, efb_msgs:  Union[Message, List[Message]]):
             vendor_specific["comwechat_info"] = msg
         else:
             vendor_specific["comwechat_info"] = safe_info
+        if bridge_trace_id:
+            vendor_specific["bridge_trace_id"] = bridge_trace_id[:12]
         setattr(efb_msg, "vendor_specific", vendor_specific)
     return efb_msgs
 

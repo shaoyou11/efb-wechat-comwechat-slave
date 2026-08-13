@@ -41,3 +41,24 @@ def test_chatroom_member_ids_filters_empty_values():
     assert MODULE.chatroom_member_ids({"members": "a^Gb^G"}) == ["a", "b"]
     assert MODULE.chatroom_member_ids({"members": ""}) == []
     assert MODULE.chatroom_member_ids({}) == []
+from efb_wechat_comwechat_slave.MsgDeco import efb_share_link_wrapper, efb_miniprogram_wrapper
+
+
+def test_customer_service_menu_does_not_expose_raw_anchor_markup():
+    xml = '''<msg><appmsg><type>5</type><showtype>0</showtype>
+      <title>请选择</title><url>weixin://kefumenu?id=1</url>
+      <des>1.&lt;a href="weixin://kefumenu?id=2"&gt;查询进度&lt;/a&gt;</des>
+    </appmsg></msg>'''
+
+    message = efb_share_link_wrapper({"message": xml}, None)
+
+    assert "<a href" not in (message.attributes.description or "")
+    assert "查询进度" in (message.attributes.description or "")
+
+
+def test_miniprogram_missing_optional_fields_falls_back_without_crashing():
+    message = efb_miniprogram_wrapper(
+        "<msg><appmsg><title>测试小程序</title><type>33</type></appmsg></msg>"
+    )
+
+    assert message.text == "微信小程序\n测试小程序"
