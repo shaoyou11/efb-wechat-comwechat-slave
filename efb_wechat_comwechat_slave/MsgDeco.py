@@ -22,6 +22,19 @@ from .finder_feed import (
 
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
 
+
+def _xml_text(xml, path: str, default: str = "") -> str:
+    value = xml.xpath(f"string({path})")
+    return str(value or default).strip()
+
+
+def _readable_description(value: str) -> str:
+    if not value:
+        return ""
+    text = re.sub(r"<a\b[^>]*>(.*?)</a>", r"\1（请在微信内操作）", value,
+                  flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"<[^>]+>", "", text).strip()
+
 def qutoed_text(qutoed_text: str, text: str, prefix: str = "") -> str:
     if QUOTE_DIVIDER in qutoed_text:
         qutoed_text = qutoed_text.split(QUOTE_DIVIDER)[-1]
@@ -396,9 +409,9 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                         subs = re.findall('<[\s\S]+?>', title)
                         for sub in subs:
                             title = title.replace(sub, '')
-                    url = xml.xpath('/msg/appmsg/url/text()')[0]
+                    url = _xml_text(xml, '/msg/appmsg/url')
                     if len(xml.xpath('/msg/appmsg/des/text()'))!=0:
-                        des = xml.xpath('/msg/appmsg/des/text()')[0]
+                        des = _readable_description(_xml_text(xml, '/msg/appmsg/des'))
                     if len(xml.xpath('/msg/appmsg/thumburl/text()'))!=0:
                         thumburl = xml.xpath('/msg/appmsg/thumburl/text()')[0]
                     if len(xml.xpath('/msg/appinfo/appname/text()'))!=0:
@@ -676,12 +689,13 @@ def efb_qqmail_wrapper(text: str) -> Message:
 
 def efb_miniprogram_wrapper(text: str) -> Message:
     xml = etree.fromstring(text)
-    result_text = ""
-    title = xml.xpath('/msg/appmsg/title/text()')[0]
-    programname = xml.xpath('/msg/appmsg/sourcedisplayname/text()')[0]
-    imgurl = xml.xpath('/msg/appmsg/weappinfo/weappiconurl/text()')[0].strip("<![CDATA[").strip("]]>")
-    url = xml.xpath('/msg/appmsg/url/text()')[0]
-    result_text = f"from: {programname}\n  - - - - - - - - - - - - - - - \n微信小程序信息"
+    title = _xml_text(xml, '/msg/appmsg/title', '未命名小程序')
+    programname = _xml_text(xml, '/msg/appmsg/sourcedisplayname')
+    imgurl = _xml_text(xml, '/msg/appmsg/weappinfo/weappiconurl') or None
+    url = _xml_text(xml, '/msg/appmsg/url')
+    if not url:
+        return Message(type=MsgType.Text, text=f"微信小程序\n{title}")
+    result_text = f"微信小程序\n来源：{programname}" if programname else "微信小程序"
     attribute = LinkAttribute(
         title= f'{title}',
         description= result_text,
