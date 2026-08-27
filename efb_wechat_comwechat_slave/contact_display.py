@@ -49,6 +49,24 @@ def should_publish_resolved_name(
     return bool(resolved) and resolved != wxid and resolved != cached and is_technical_contact_id(wxid)
 
 
+def should_force_name_sync(
+    wxid: str,
+    previous_name: Optional[str],
+    resolved_name: Optional[str],
+) -> bool:
+    """Force a topic rename only when a cached technical name was replaced."""
+    previous = (previous_name or "").strip()
+    resolved = (resolved_name or "").strip()
+    return (
+        bool(previous)
+        and is_technical_contact_id(wxid)
+        and _is_technical_name(wxid, previous)
+        and bool(resolved)
+        and resolved != wxid
+        and resolved != previous
+    )
+
+
 def resolve_contact_name(
     wxid: str,
     cached_name: Optional[str],

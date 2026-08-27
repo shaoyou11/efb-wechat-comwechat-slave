@@ -50,6 +50,7 @@ from .contact_display import (
     extract_mentioned_alias,
     is_technical_contact_id,
     resolve_contact_name,
+    should_force_name_sync,
     should_publish_resolved_name,
     update_existing_chat_name,
 )
@@ -1476,9 +1477,17 @@ class ComWeChatChannel(SlaveChannel):
         contacts = self.bot.GetContactListBySql()
         for contact in contacts:
             data = contacts[contact]
+            existing_chat = next(
+                (chat for chat in (self.groups if "@chatroom" in contact else self.friends)
+                 if chat.uid == contact),
+                None,
+            )
+            previous_name = self.contacts.get(contact)
+            if previous_name is None and existing_chat is not None:
+                previous_name = existing_chat.name
             name = (f"{data['remark']}({data['nickname']})") if data["remark"] else data["nickname"]
             name = resolve_contact_name(contact, name, lambda wxid: self.bot.GetContactBySql(wxid=wxid))
-            if is_technical_contact_id(contact) and name != contact:
+            if should_force_name_sync(contact, previous_name, name):
                 resolved_name_updates.append(contact)
 
             self.contacts[contact] = name

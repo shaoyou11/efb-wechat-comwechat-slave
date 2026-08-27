@@ -10,6 +10,7 @@ resolve_contact_name = MODULE.resolve_contact_name
 update_existing_chat_name = MODULE.update_existing_chat_name
 extract_mentioned_alias = MODULE.extract_mentioned_alias
 should_publish_resolved_name = MODULE.should_publish_resolved_name
+should_force_name_sync = MODULE.should_force_name_sync
 
 
 def test_notifymessage_is_localized_without_lookup():
@@ -65,6 +66,12 @@ def test_resolved_technical_name_is_published_only_after_a_real_name_change():
     assert should_publish_resolved_name("gh_366bf6794a09", "gh_366bf6794a09", "岁月观")
     assert not should_publish_resolved_name("gh_366bf6794a09", "岁月观", "岁月观")
     assert not should_publish_resolved_name("wxid_demo", "张三", "张三")
+
+
+def test_bulk_refresh_only_forces_sync_after_a_cached_technical_name_changes():
+    assert should_force_name_sync("gh_366bf6794a09", "gh_366bf6794a09", "岁月观")
+    assert not should_force_name_sync("gh_366bf6794a09", None, "岁月观")
+    assert not should_force_name_sync("gh_366bf6794a09", "岁月观", "岁月观")
 
 
 def test_existing_chat_object_gets_the_refreshed_name():
