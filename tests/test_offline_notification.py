@@ -23,5 +23,5 @@ def test_offline_prompt_has_close_action_and_login_cleanup_hook():
     ).read_text(encoding="utf-8")
 
     assert "__delete_message__" in source
-    assert "关闭提醒" in source
+    assert "删除这条消息" in source
     assert "cleanup_same_day_offline_notices" in source

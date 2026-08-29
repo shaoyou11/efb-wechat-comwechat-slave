@@ -16,11 +16,27 @@ def MsgWrapper(msg, efb_msgs:  Union[Message, List[Message]]):
     efb_msgs = [efb_msgs] if isinstance(efb_msgs, Message) else efb_msgs
     if not efb_msgs:
         return
+    xml = msg.get("message")
+    finder_feed = any(
+        isinstance(getattr(efb_msg, "vendor_specific", None), dict)
+        and getattr(efb_msg, "vendor_specific", {}).get("finder_feed")
+        for efb_msg in efb_msgs
+    )
+    safe_info = {
+        key: msg.get(key)
+        for key in ("type", "msgid", "sender", "self", "timestamp")
+        if msg.get(key) is not None
+    }
+    bridge_trace_id = str(msg.get("_bridge_trace_id") or "").strip()
     for efb_msg in efb_msgs:
-        vendor_specific = getattr(efb_msg, "vendor_specific", {})
-        xml = msg.pop("message", None)
-        vendor_specific["wx_xml"] = xml
-        vendor_specific["comwechat_info"] = msg
+        vendor_specific = dict(getattr(efb_msg, "vendor_specific", {}) or {})
+        if not finder_feed:
+            vendor_specific["wx_xml"] = xml
+            vendor_specific["comwechat_info"] = msg
+        else:
+            vendor_specific["comwechat_info"] = safe_info
+        if bridge_trace_id:
+            vendor_specific["bridge_trace_id"] = bridge_trace_id[:12]
         setattr(efb_msg, "vendor_specific", vendor_specific)
     return efb_msgs
 

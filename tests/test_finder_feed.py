@@ -55,14 +55,24 @@ def test_parse_finder_feed_extracts_video_metadata():
     assert feed.duration_seconds == 29
     assert feed.object_id == "14964026784220842528"
     assert feed.object_nonce_id == "nonce-value"
-    assert feed.share_url == (
-        "https://channels.weixin.qq.com/web/pages/feed?"
-        "oid=14964026784220842528&nid=nonce-value"
-    )
+    assert feed.share_url == ""
+    assert "video_url" not in feed.public_metadata
+    assert "cover_url" not in feed.public_metadata
 
 
 def test_parse_finder_feed_ignores_normal_link():
     assert parse_finder_feed("<msg><appmsg><type>5</type></appmsg></msg>") is None
+
+
+def test_parse_finder_feed_keeps_exact_public_short_link():
+    xml = FINDER_XML.replace(
+        "<url>https://support.weixin.qq.com/update/</url>",
+        "<url>https://weixin.qq.com/sph/A3ZOAAxUIJ?from=share</url>",
+    )
+
+    feed = parse_finder_feed(xml)
+
+    assert feed.share_url == "https://weixin.qq.com/sph/A3ZOAAxUIJ"
 
 
 def _load_msg_deco(monkeypatch):
@@ -156,42 +166,72 @@ def _temp_media(suffix):
     return file
 
 
-def test_finder_feed_wrapper_returns_video(monkeypatch):
+def test_finder_feed_wrapper_returns_safe_metadata_and_defers_video(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
+    called = []
 
     message = msg_deco.efb_finder_feed_wrapper(
         FINDER_XML,
-        downloader=lambda url: _temp_media(".mp4"),
+        downloader=lambda *args, **kwargs: called.append((args, kwargs)),
     )
 
-    assert message.type == "video"
-    assert message.filename == "wechat-channel.mp4"
+    assert message.type == "text"
     assert "小小电影课代表" in message.text
     assert "29 秒" in message.text
     assert "当前微信版本不支持" not in message.text
+    assert called == []
+    assert message.vendor_specific["finder_feed"]["object_id"]
+    assert "video_url" not in message.vendor_specific["finder_feed"]
 
 
-def test_finder_feed_wrapper_falls_back_to_cover_with_link(monkeypatch):
+def test_finder_feed_wrapper_legacy_mode_uses_safe_media_options(monkeypatch):
     msg_deco = _load_msg_deco(monkeypatch)
     requested = []
 
-    def downloader(url):
-        requested.append(url)
+    def downloader(url, **kwargs):
+        requested.append((url, kwargs))
         if url.endswith("video.mp4"):
             raise OSError("video expired")
         return _temp_media(".jpg")
 
-    message = msg_deco.efb_finder_feed_wrapper(FINDER_XML, downloader=downloader)
+    message = msg_deco.efb_finder_feed_wrapper(
+        FINDER_XML,
+        downloader=downloader,
+        defer_video=False,
+    )
 
-    assert requested == [
+    assert [item[0] for item in requested] == [
         "https://example.test/video.mp4",
         "https://example.test/cover.jpg",
     ]
     assert message.type == "image"
     assert message.filename == "wechat-channel.jpg"
     assert "关于三个老婆" in message.text
-    assert "https://channels.weixin.qq.com/web/pages/feed?" in message.text
-    assert "视频直链：https://example.test/video.mp4" in message.text
+    assert "视频直链" not in message.text
+    assert requested[0][1]["require_https"] is True
+    assert "example.test" not in requested[0][1]["allowed_hosts"]
+
+
+def test_finder_feed_wrapper_cover_only_skips_video_and_sends_cover(monkeypatch):
+    msg_deco = _load_msg_deco(monkeypatch)
+    requested = []
+
+    def downloader(url, **kwargs):
+        requested.append((url, kwargs))
+        return _temp_media(".jpg")
+
+    message = msg_deco.efb_finder_feed_wrapper(
+        FINDER_XML,
+        downloader=downloader,
+        defer_video=False,
+        cover_only=True,
+    )
+
+    assert [item[0] for item in requested] == ["https://example.test/cover.jpg"]
+    assert message.type == "image"
+    assert message.filename == "wechat-channel.jpg"
+    assert "已保留封面" in message.text
+    assert message.text.startswith("【微信视频号】")
 
 
 def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):
@@ -200,10 +240,7 @@ def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):
     def unavailable(url):
         raise OSError("expired")
 
-    message = msg_deco.efb_finder_feed_wrapper(
-        FINDER_XML,
-        downloader=unavailable,
-    )
+    message = msg_deco.efb_finder_feed_wrapper(FINDER_XML, downloader=unavailable, defer_video=False)
 
     assert message.type == "text"
     assert "小小电影课代表" in message.text

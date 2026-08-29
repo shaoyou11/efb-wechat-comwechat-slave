@@ -6,10 +6,11 @@ import re
 import json
 import yaml
 import time
-from typing import Dict , Any
+from typing import Dict , Any, Iterable, Optional
 import pilk
 import pydub
 import os
+from urllib.parse import urlparse
 
 #从本地读取配置
 def load_config(path : str) -> Dict[str, None]:
@@ -26,21 +27,91 @@ def load_config(path : str) -> Dict[str, None]:
         config: Dict[str, Any] = d
     return config
 
-def download_file(url: str, retry: int = 3) -> tempfile:
+def redact_url(url: str) -> str:
+    """Return a log-safe URL without query tokens or fragments."""
+    try:
+        parsed = urlparse(str(url))
+        host = parsed.hostname or "unknown-host"
+        path = parsed.path or "/"
+        return f"{parsed.scheme}://{host}{path}"
+    except (TypeError, ValueError):
+        return "<invalid-url>"
+
+
+def _host_allowed(host: Optional[str], allowed_hosts: Optional[Iterable[str]]) -> bool:
+    if not allowed_hosts:
+        return True
+    host = (host or "").lower().rstrip(".")
+    for allowed in allowed_hosts:
+        suffix = str(allowed).lower().lstrip(".").rstrip(".")
+        if host == suffix or host.endswith("." + suffix):
+            return True
+    return False
+
+
+def _looks_like_media(path: str, expected_kind: Optional[str]) -> bool:
+    if not expected_kind:
+        return True
+    with open(path, "rb") as handle:
+        header = handle.read(512)
+    if expected_kind == "video":
+        return (
+            b"ftyp" in header[:128]
+            or header.startswith(b"\x1a\x45\xdf\xa3")
+            or header.startswith(b"RIFF")
+            or header.startswith(b"\x00\x00\x01\xba")
+            or header.startswith(b"\x00\x00\x01\xb3")
+        )
+    if expected_kind == "image":
+        return (
+            header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"\x89PNG\r\n\x1a\n")
+            or header.startswith(b"GIF8")
+            or header.startswith(b"RIFF") and b"WEBP" in header[:16]
+        )
+    return True
+
+
+def download_file(
+    url: str,
+    retry: int = 3,
+    *,
+    allowed_hosts: Optional[Iterable[str]] = None,
+    max_bytes: Optional[int] = None,
+    timeout=(5, 20),
+    expected_kind: Optional[str] = None,
+    require_https: bool = False,
+) -> tempfile:
     """
     A function that downloads files from given URL
     Remember to close the file once you are done with the file!
     :param retry: The max retries before giving up
     :param url: The URL that points to the file
     """
-    count = 1
-    while True:
+    parsed = urlparse(str(url))
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("unsupported media URL scheme")
+    if require_https and parsed.scheme != "https":
+        raise ValueError("media URL must use HTTPS")
+    if not _host_allowed(parsed.hostname, allowed_hosts):
+        raise ValueError("media URL host is not allowed")
+
+    if max_bytes is None:
+        max_bytes = int(os.getenv("EFB_MEDIA_DOWNLOAD_MAX_BYTES", 512 * 1024 * 1024))
+    max_bytes = max(1, int(max_bytes))
+    attempts = max(1, int(retry))
+    last_error = None
+    for count in range(1, attempts + 1):
+        file = None
+        response = None
         try:
-            file = tempfile.NamedTemporaryFile()
-            r = requests.get(
+            file = tempfile.NamedTemporaryFile(prefix="efb-media-", mode="w+b")
+            os.fchmod(file.fileno(), 0o600)
+            response = requests.get(
                 url,
                 stream=True,
-                timeout=30,
+                timeout=timeout,
+                allow_redirects=True,
                 headers={
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -50,22 +121,58 @@ def download_file(url: str, retry: int = 3) -> tempfile:
                     "Referer": "https://weixin.qq.com/",
                 },
             )
-            r.raise_for_status()
-            for chunk in r.iter_content(chunk_size=1024):
+            response.raise_for_status()
+            response_url = getattr(response, "url", url)
+            response_parsed = urlparse(str(response_url))
+            if require_https and response_parsed.scheme != "https":
+                raise ValueError("media redirect is not HTTPS")
+            if not _host_allowed(response_parsed.hostname, allowed_hosts):
+                raise ValueError("media redirect host is not allowed")
+            headers = getattr(response, "headers", {}) or {}
+            content_length = headers.get("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError("media response exceeds size limit")
+            content_type = str(headers.get("Content-Type", "")).lower()
+            if expected_kind and content_type.startswith("text/"):
+                raise ValueError("media response is text, not media")
+            total = 0
+            for chunk in response.iter_content(chunk_size=1024):
                 if chunk:
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("media response exceeds size limit")
                     file.write(chunk)
-                    file.flush()
             if file.tell() == 0:
                 raise ValueError("Downloaded file is empty")
+            file.flush()
+            os.fsync(file.fileno())
+            file.seek(0)
+            if not _looks_like_media(file.name, expected_kind):
+                raise ValueError("media content signature is invalid")
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                close_response()
+            response = None
+            file.seek(0)
+            return file
         except Exception as e:
-            logging.getLogger(__name__).warning(f"Error occurred when downloading {url}. {e}")
-            if count >= retry:
-                logging.getLogger(__name__).warning(f"Maximum retry reached. Giving up.")
-                raise e
-            count += 1
-        else:
-            break
-    return file
+            last_error = e
+            if file is not None:
+                file.close()
+            logging.getLogger(__name__).warning(
+                "媒体下载失败 url=%s attempt=%s/%s reason=%s",
+                redact_url(url),
+                count,
+                attempts,
+                type(e).__name__,
+            )
+            if count < attempts:
+                time.sleep(min(2, count))
+        finally:
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                close_response()
+    raise last_error
 
 def wait_for_local_file(
     file: str,

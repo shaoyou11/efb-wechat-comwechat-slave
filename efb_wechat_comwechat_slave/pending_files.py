@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -62,6 +63,21 @@ def delivery_confirmed(results) -> bool:
         status in {"delivered", "filtered", "skipped", "stored_for_retry"}
         for status in statuses
     )
+
+
+def media_path_state(path: str) -> str:
+    """Classify an attachment path without treating directories as media."""
+    try:
+        metadata = os.stat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unavailable"
+    if not stat.S_ISREG(metadata.st_mode):
+        return "invalid"
+    if metadata.st_size <= 0:
+        return "empty"
+    return "ready"
 
 
 class PendingFileStore:

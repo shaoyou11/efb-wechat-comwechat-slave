@@ -1,4 +1,5 @@
 import logging, tempfile
+import queue
 import time
 import threading
 from lxml import etree
@@ -7,6 +8,7 @@ from pydub import AudioSegment
 import os
 import base64
 from pathlib import Path
+from urllib import request as urlrequest
 from xml.sax.saxutils import escape
 
 import re
@@ -38,14 +40,29 @@ from ehforwarderbot.status import MessageRemoval, ChatUpdates
 
 from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat, EFBGroupMember, EFBSystemUser
-from .MsgDeco import qutoed_text
+from .MsgDeco import (
+    VIDEO_MEDIA_ALLOWED_HOSTS,
+    efb_image_wrapper,
+    efb_text_simple_wrapper,
+    efb_video_wrapper,
+    finder_feed_caption,
+    qutoed_text,
+)
 from .MsgProcess import MsgProcess, MsgWrapper
 from .Utils import download_file , load_config , load_temp_file_to_local , WC_EMOTICON_CONVERSION
+from .finder_feed import parse_finder_feed
+from .finder_feed_jobs import FinderFeedJobStore
+from .wechat_recall import build_wechat_recall_metadata
+from .finder_resolver import resolve_feed
 from .db import DatabaseManager
 from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
-from .login_confirmation import LoginConfirmation, login_confirmation_message
+from .login_confirmation import (
+    LoginConfirmation,
+    login_confirmation_message,
+    stable_login_state,
+)
 from .contact_display import (
     extract_mentioned_alias,
     is_technical_contact_id,
@@ -70,9 +87,18 @@ from .pending_files import (
     PendingFileStore,
     build_pending_file_record,
     delivery_confirmed,
+    media_path_state,
 )
-from .login_qr import LoginQrStore, select_revoke_uids
+from .login_qr import (
+    LoginQrStore,
+    ManualLoginSessionStore,
+    active_qr_expiry,
+    has_active_qr,
+    has_recent_qr,
+    select_revoke_uids,
+)
 from .member_avatar_marker import MemberAvatarMarkerStore
+from .session_events import SessionEventStore
 
 from rich.console import Console
 from rich import print as rprint
@@ -84,6 +110,21 @@ OFFLINE_LOGIN_NOTICE = (
     "检测到微信未登录，请发送 /login 获取登录二维码，或发送 /wechat "
     "打开微信管理"
 )
+
+
+def non_blocking_lock_wrapper(lock: threading.Lock):
+    def wrapper(func):
+        def inner(*args, **kwargs):
+            if not lock.acquire(False):
+                return None
+            try:
+                return func(*args, **kwargs)
+            finally:
+                lock.release()
+
+        return inner
+
+    return wrapper
 
 
 class ComWeChatChannel(SlaveChannel):
@@ -139,8 +180,35 @@ class ComWeChatChannel(SlaveChannel):
         self.contact_alias_store = ContactAliasStore(
             Path(config_path).parent / "contact-aliases.json"
         )
+        self.finder_feed_job_store = FinderFeedJobStore(
+            Path(os.getenv(
+                "EFB_FINDER_JOB_DB",
+                str(Path(config_path).parent / "finder-feed-jobs.db"),
+            )),
+            expiry_seconds=int(os.getenv(
+                "EFB_FINDER_JOB_EXPIRY_SECONDS",
+                self.config.get("finder_feed_job_expiry_seconds", 6 * 60 * 60),
+            )),
+        )
+        self.finder_feed_runtime = {}
+        self.finder_feed_runtime_max = max(
+            16,
+            int(os.getenv("EFB_FINDER_RUNTIME_MAX", 256)),
+        )
+        self.finder_feed_queue = queue.Queue()
+        self.finder_feed_stop_event = threading.Event()
+        self.finder_feed_worker_thread = None
+        self.finder_feed_max_bytes = max(
+            1,
+            int(self.config.get("finder_feed_max_bytes", os.getenv(
+                "EFB_FINDER_MAX_BYTES", 512 * 1024 * 1024
+            ))),
+        )
         self.login_qr_store = LoginQrStore(
             Path(config_path).parent / "login-qrcodes.json"
+        )
+        self.session_events = SessionEventStore(
+            Path(config_path).parent / "session-events.json"
         )
         self.member_avatar_markers = MemberAvatarMarkerStore(
             Path(config_path).parent / "member-avatar-markers.json",
@@ -149,7 +217,39 @@ class ComWeChatChannel(SlaveChannel):
         self.login_qr_ttl_seconds = max(
             30, int(self.config.get("login_qrcode_ttl_seconds", 180))
         )
+        self.login_qr_login_grace_seconds = max(
+            10, int(self.config.get("login_qrcode_login_grace_seconds", 30))
+        )
+        self.login_qr_session_grace_seconds = max(
+            30, int(self.config.get("login_qrcode_session_grace_seconds", 60))
+        )
+        self.login_qr_failure_grace_seconds = max(
+            15, int(self.config.get("login_qrcode_failure_grace_seconds", 45))
+        )
+        self.manual_login_session = ManualLoginSessionStore(Path(os.getenv(
+            "EFB_MANUAL_LOGIN_SESSION_PATH",
+            "/data/watchdog/state/manual-login-session.json",
+        )))
+        self.bridge_health_url = str(self.config.get(
+            "bridge_health_url",
+            os.getenv(
+                "COMWECHAT_BRIDGE_HEALTH_URL",
+                "http://127.0.0.1:19088/healthz",
+            ),
+        ))
+        self.bridge_health_timeout_seconds = max(
+            0.2,
+            float(self.config.get("bridge_health_timeout_seconds", 2)),
+        )
+        self.supervisor_health_url = str(self.config.get(
+            "supervisor_health_url",
+            os.getenv(
+                "COMWECHAT_SUPERVISOR_HEALTH_URL",
+                "http://127.0.0.1:19089/healthz",
+            ),
+        ))
         self.login_qr_lock = threading.RLock()
+        self.login_qr_in_progress = threading.Event()
         self.watchdog_recovery_success_path = Path(
             os.getenv(
                 "WATCHDOG_RECOVERY_SUCCESS_PATH",
@@ -297,7 +397,15 @@ class ComWeChatChannel(SlaveChannel):
 
             newmsgid = re.search("<newmsgid>(.*?)<\/newmsgid>", msg["message"]).group(1)
 
-            efb_msg = Message(chat = chat , uid = newmsgid)
+            efb_msg = Message(
+                chat=chat,
+                uid=newmsgid,
+                vendor_specific={
+                    "wechat_recall": build_wechat_recall_metadata(
+                        msg, getattr(self, "wxid", "")
+                    ),
+                },
+            )
             coordinator.send_status(
                 MessageRemoval(source_channel=self, destination_channel=coordinator.master, message=efb_msg)
             )
@@ -455,6 +563,21 @@ class ComWeChatChannel(SlaveChannel):
         except:
             return False
 
+    def is_login_stable(self) -> bool:
+        try:
+            probes = max(1, int(os.getenv("COMWECHAT_LOGIN_CONFIRM_PROBES", "3")))
+            interval = max(
+                0.0,
+                float(os.getenv("COMWECHAT_LOGIN_CONFIRM_INTERVAL_SECONDS", "2")),
+            )
+        except (TypeError, ValueError):
+            probes, interval = 3, 2.0
+        return stable_login_state(
+            self.is_login,
+            probes=probes,
+            interval_seconds=interval,
+        )
+
     def get_qrcode(self):
         result = self.bot.GetQrcodeImage()
         
@@ -464,6 +587,48 @@ class ComWeChatChannel(SlaveChannel):
             return None
         except Exception:
             return self.save_qr_code(result)
+
+    def get_bridge_stack_generation(self):
+        supervisor_request = urlrequest.Request(
+            self.supervisor_health_url,
+            method="GET",
+        )
+        with urlrequest.urlopen(
+            supervisor_request,
+            timeout=self.bridge_health_timeout_seconds,
+        ) as response:
+            supervisor = json.loads(response.read().decode("utf-8"))
+        if not supervisor.get("ok") or supervisor.get("state") != "running":
+            raise RuntimeError("微信客户端主管正在恢复")
+
+        req = urlrequest.Request(self.bridge_health_url, method="GET")
+        with urlrequest.urlopen(
+            req,
+            timeout=self.bridge_health_timeout_seconds,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        generation = str(payload.get("stack_generation", "")).strip()
+        if (
+            not payload.get("ok")
+            or not payload.get("hooks_ready")
+            or not generation
+        ):
+            raise RuntimeError("Bridge 尚未完成微信栈初始化")
+        return generation
+
+    def protect_manual_login_session(self, expires_at, stack_generation, now=None):
+        now = int(time.time()) if now is None else int(now)
+        current = self.manual_login_session.snapshot(now)
+        if (
+            current.get("expires_at", 0) >= int(expires_at)
+            and current.get("stack_generation") == str(stack_generation)
+        ):
+            return current
+        return self.manual_login_session.start(
+            int(expires_at),
+            stack_generation=stack_generation,
+            now=now,
+        )
 
     @staticmethod
     def save_qr_code(qr_code):
@@ -492,15 +657,15 @@ class ComWeChatChannel(SlaveChannel):
             uid=MessageID(str(int(time.time()))),
         )
         has_pending_qr = bool(self.login_qr_store.records())
-        if self.is_login():
-            self.after_login()
+        if self.is_login_stable():
+            login_transition = self.after_login()
             auto_recovery = self.announce_watchdog_recovery_success()
             if auto_recovery:
                 msg.text = None
             else:
                 msg.text = login_confirmation_message(
                     logged_in=True,
-                    has_pending_qr=has_pending_qr,
+                    has_pending_qr=has_pending_qr or login_transition,
                 )
             if msg.text:
                 self.send_efb_msgs(msg, chat=chat, author=author)
@@ -508,6 +673,10 @@ class ComWeChatChannel(SlaveChannel):
         else:
             if not has_pending_qr:
                 return False
+            if self.manual_login_session.active():
+                self.logger.info("二维码确认期内登录状态尚未稳定，保留二维码继续等待")
+                return False
+            self.manual_login_session.clear()
             self.revoke_login_qrcodes(completed=True)
             msg.text = login_confirmation_message(
                 logged_in=False,
@@ -585,11 +754,21 @@ class ComWeChatChannel(SlaveChannel):
             self._remove_watchdog_recovery_success()
             return bool(text)
 
-    def after_login(self):
-        self.revoke_login_qrcodes(completed=True)
+    def after_login(self) -> bool:
         self.get_me()
-        self.GetContactListBySql()
-        self.GetGroupListBySql()
+        if not self.wxid:
+            raise RuntimeError("微信身份信息尚未就绪")
+        for name, refresh in (
+            ("联系人", self.GetContactListBySql),
+            ("群组", self.GetGroupListBySql),
+        ):
+            try:
+                refresh()
+            except Exception as error:
+                self.logger.warning("登录后%s同步暂不可用，稍后自动更新: %s", name, error)
+        login_transition = self.session_events.observe(True)
+        self.manual_login_session.clear()
+        self.revoke_login_qrcodes(completed=True)
         master = getattr(coordinator, "master", None)
         cleanup = getattr(master, "cleanup_same_day_offline_notices", None)
         if callable(cleanup):
@@ -599,17 +778,23 @@ class ComWeChatChannel(SlaveChannel):
                     self.logger.info("登录成功后清理当天微信未登录提醒: %s 条", removed)
             except Exception as error:
                 self.logger.warning("清理当天微信未登录提醒失败: %s", error)
+        return login_transition
 
-    def revoke_login_qrcodes(self, completed=False):
+    def revoke_login_qrcodes(self, completed=False, target_uids=None):
         if getattr(coordinator, "master", None) is None:
             return 0
         with self.login_qr_lock:
-            uids = select_revoke_uids(
-                self.login_qr_store.records(),
-                now=int(time.time()),
-                ttl_seconds=self.login_qr_ttl_seconds,
-                completed=completed,
-            )
+            records = self.login_qr_store.records()
+            if target_uids is None:
+                uids = select_revoke_uids(
+                    records,
+                    now=int(time.time()),
+                    ttl_seconds=self.login_qr_ttl_seconds,
+                    completed=completed,
+                )
+            else:
+                known_uids = {str(record.get("uid", "")) for record in records}
+                uids = [str(uid) for uid in target_uids if str(uid) in known_uids]
             removed = 0
             for uid in uids:
                 message = Message(
@@ -636,29 +821,143 @@ class ComWeChatChannel(SlaveChannel):
     @efb_utils.extra(name="重新扫码登录",
            desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
-        self.revoke_login_qrcodes(completed=True)
-        file = self.get_qrcode()
-        chat = self.user_auth_chat
-        author = self.user_auth_chat.other
-        msg = Message(
-            type=MsgType.Text,
-            uid=MessageID(f"login-qr-{time.time_ns()}"),
-        )
+        try:
+            stack_generation = self.get_bridge_stack_generation()
+        except Exception as error:
+            self.logger.warning("读取微信栈代次失败: %s", error)
+            return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
 
-        if not file:
-            if self.is_login():
+        now = int(time.time())
+        records = self.login_qr_store.records()
+        if has_active_qr(
+            records,
+            now=now,
+            ttl_seconds=self.login_qr_ttl_seconds,
+            stack_generation=stack_generation,
+        ):
+            expires_at = active_qr_expiry(
+                records,
+                now=now,
+                ttl_seconds=self.login_qr_ttl_seconds,
+                grace_seconds=self.login_qr_session_grace_seconds,
+                stack_generation=stack_generation,
+            )
+            if expires_at:
+                self.protect_manual_login_session(
+                    expires_at,
+                    stack_generation=stack_generation,
+                    now=now,
+                )
+            return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
+
+        if not self.login_qr_lock.acquire(blocking=False):
+            return "登录二维码正在生成，请稍候，不要重复发送 /login"
+
+        self.login_qr_in_progress.set()
+        try:
+            try:
+                stack_generation = self.get_bridge_stack_generation()
+            except Exception as error:
+                self.logger.warning("生成二维码前微信栈尚未就绪: %s", error)
+                return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
+            now = int(time.time())
+            if has_active_qr(
+                self.login_qr_store.records(),
+                now=now,
+                ttl_seconds=self.login_qr_ttl_seconds,
+                stack_generation=stack_generation,
+            ):
+                expires_at = active_qr_expiry(
+                    self.login_qr_store.records(),
+                    now=now,
+                    ttl_seconds=self.login_qr_ttl_seconds,
+                    grace_seconds=self.login_qr_session_grace_seconds,
+                    stack_generation=stack_generation,
+                )
+                if expires_at:
+                    self.protect_manual_login_session(
+                        expires_at,
+                        stack_generation=stack_generation,
+                        now=now,
+                    )
+                return "登录二维码仍在有效期内，请使用上一张扫码，无需重复发送 /login"
+            if self.is_login_stable():
                 self.after_login()
-                return "登录成功"
-            else:
-                return "获取二维码失败，请稍后再试"
-        else:
-            msg.type = MsgType.Image
+                return "微信当前已登录，无需重新扫码"
+
+            self.wxid = None
+            self.session_events.observe(False)
+            self.protect_manual_login_session(
+                now + getattr(self, "login_qr_failure_grace_seconds", 45),
+                stack_generation=stack_generation,
+                now=now,
+            )
+
+            try:
+                file = self.get_qrcode()
+            except Exception as error:
+                self.logger.warning("获取登录二维码时微信接口暂不可用: %s", error)
+                return "微信服务正在恢复，原二维码未删除，请稍后再发送 /login"
+
+            if not file:
+                if self.is_login_stable():
+                    self.after_login()
+                    return "登录成功"
+                return "暂未取得登录二维码，原二维码未删除，请稍后再试"
+
+            try:
+                generation_after_qr = self.get_bridge_stack_generation()
+            except Exception as error:
+                self.logger.warning("二维码生成后微信栈进入恢复: %s", error)
+                return "生成二维码时微信客户端发生恢复，请稍后重新发送 /login"
+            if generation_after_qr != stack_generation:
+                self.logger.warning(
+                    "二维码生成期间微信栈代次变化: %s -> %s",
+                    stack_generation,
+                    generation_after_qr,
+                )
+                return "生成二维码时微信客户端已经重启，请重新发送 /login"
+
+            previous_uids = [
+                record.get("uid")
+                for record in self.login_qr_store.records()
+                if record.get("uid")
+            ]
+            msg = Message(
+                type=MsgType.Image,
+                uid=MessageID(f"login-qr-{time.time_ns()}"),
+            )
             msg.path = Path(file.name)
             msg.file = file
             msg.mime = 'image/png'
-            self.send_efb_msgs(msg, chat=chat, author=author)
-            self.login_qr_store.add(msg.uid, created_at=int(time.time()))
-        return "请扫描二维码登录"
+            try:
+                self.send_efb_msgs(
+                    msg,
+                    chat=self.user_auth_chat,
+                    author=self.user_auth_chat.other,
+                )
+            except Exception as error:
+                self.logger.warning("发送登录二维码失败: %s", error)
+                return "二维码已生成但发送失败，原二维码未删除，请稍后再试"
+            self.login_qr_store.add(
+                msg.uid,
+                created_at=int(time.time()),
+                stack_generation=stack_generation,
+            )
+            session_now = int(time.time())
+            self.protect_manual_login_session(
+                session_now
+                + self.login_qr_ttl_seconds
+                + self.login_qr_session_grace_seconds,
+                stack_generation=stack_generation,
+                now=session_now,
+            )
+            self.revoke_login_qrcodes(target_uids=previous_uids)
+            self.revoke_login_qrcodes(completed=False)
+            return "请扫描二维码登录；二维码有效期内请勿重复发送 /login"
+        finally:
+            self.login_qr_in_progress.clear()
+            self.login_qr_lock.release()
 
     @efb_utils.extra(name="强制退出微信",
            desc="强制退出")
@@ -668,6 +967,8 @@ class ComWeChatChannel(SlaveChannel):
             return "退出失败，原因: %s" % res
         else:
             self.wxid = None
+            self.manual_login_session.clear()
+            self.session_events.record(False)
             return "退出成功"
 
     @staticmethod
@@ -689,6 +990,192 @@ class ComWeChatChannel(SlaveChannel):
                 if efb_msg.file:
                     efb_msg.file.close()
         return results
+
+    def _enqueue_finder_feed(self, msg, efb_msg, author, chat):
+        metadata = (getattr(efb_msg, "vendor_specific", {}) or {}).get("finder_feed")
+        if not isinstance(metadata, dict):
+            return
+        feed = parse_finder_feed(str(msg.get("message") or ""))
+        if feed is None:
+            return
+        try:
+            job_id = self.finder_feed_job_store.enqueue(
+                source_uid=str(msg["msgid"]),
+                chat_uid=str(chat.uid),
+                chat_kind="group" if isinstance(chat, GroupChat) else "private",
+                author_uid=str(getattr(author, "uid", "")),
+                object_id=feed.object_id,
+                object_nonce_id=feed.object_nonce_id,
+            )
+        except Exception:
+            self.logger.exception("创建视频号按需任务失败: msgid=%s", msg.get("msgid"))
+            return
+        while len(self.finder_feed_runtime) >= self.finder_feed_runtime_max:
+            oldest_job_id = next(iter(self.finder_feed_runtime), None)
+            if oldest_job_id is None:
+                break
+            self.finder_feed_runtime.pop(oldest_job_id, None)
+            self.finder_feed_job_store.finish(oldest_job_id, "expired", "runtime_limit")
+        self.finder_feed_runtime[job_id] = {
+            "feed": feed,
+            "chat": chat,
+            "author": author,
+            "source_uid": str(msg["msgid"]),
+        }
+        vendor_specific = dict(getattr(efb_msg, "vendor_specific", {}) or {})
+        finder_metadata = dict(metadata)
+        finder_metadata["job_id"] = job_id
+        finder_metadata["mode"] = "on_demand"
+        vendor_specific["finder_feed"] = finder_metadata
+        efb_msg.vendor_specific = vendor_specific
+
+    def request_finder_feed_video(self, job_id: str) -> str:
+        """Queue one short-lived video job after a Telegram admin click."""
+        job_id = str(job_id or "")[:64]
+        record = self.finder_feed_job_store.get(job_id)
+        if not record:
+            return "expired"
+        if record["state"] == "waiting":
+            record = self.finder_feed_job_store.request(job_id)
+            if record and record["state"] == "requested":
+                self.finder_feed_queue.put(job_id)
+                return "queued"
+        if record["state"] in {"requested", "processing"}:
+            return "already_queued"
+        if record["state"] == "sent":
+            return "sent"
+        if record["state"] == "failed":
+            return "failed"
+        return "expired"
+
+    def finder_feed_status(self) -> dict:
+        self.finder_feed_job_store.expire_stale()
+        counts = self.finder_feed_job_store.counts()
+        return {
+            "waiting": counts["waiting"],
+            "requested": counts["requested"],
+            "processing": counts["processing"],
+            "sent": counts["sent"],
+            "failed": counts["failed"],
+            "expired": counts["expired"],
+        }
+
+    def _finder_feed_message(self, kind, file, text, chat, author, source_uid, job_id):
+        if kind == "video":
+            message = efb_video_wrapper(file, filename="wechat-channel.mp4", text=text)
+        else:
+            message = efb_image_wrapper(file, filename="wechat-channel.jpg", text=text)
+        message.target = Message(uid=MessageID(source_uid), chat=chat)
+        self.send_efb_msgs(
+            message,
+            author=author,
+            chat=chat,
+            uid=MessageID(f"{source_uid}:finder:{job_id}"),
+        )
+
+    def _finder_feed_worker(self):
+        next_housekeeping = 0.0
+        while not self.finder_feed_stop_event.is_set():
+            now = time.monotonic()
+            if now >= next_housekeeping:
+                try:
+                    self.finder_feed_job_store.expire_stale()
+                    self.finder_feed_job_store.purge_old()
+                    for old_job_id in list(self.finder_feed_runtime):
+                        old_record = self.finder_feed_job_store.get(old_job_id)
+                        if not old_record or old_record["state"] in {"failed", "sent", "expired"}:
+                            self.finder_feed_runtime.pop(old_job_id, None)
+                except Exception:
+                    self.logger.exception("视频号任务清理失败")
+                next_housekeeping = now + 60
+            try:
+                job_id = self.finder_feed_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            record = self.finder_feed_job_store.claim(job_id)
+            runtime = self.finder_feed_runtime.get(job_id)
+            if not record or not runtime:
+                self.finder_feed_job_store.finish(job_id, "expired", "runtime_unavailable")
+                self.finder_feed_queue.task_done()
+                continue
+            try:
+                self._run_finder_feed_job(job_id, runtime)
+            except Exception:
+                self.logger.exception("视频号按需任务失败: job=%s", job_id)
+                self.finder_feed_job_store.finish(job_id, "failed", "worker_error")
+            finally:
+                self.finder_feed_runtime.pop(job_id, None)
+                self.finder_feed_queue.task_done()
+
+    def _run_finder_feed_job(self, job_id, runtime):
+        feed = runtime["feed"]
+        caption = finder_feed_caption(feed)
+        video_url = feed.video_url
+        cover_url = feed.cover_url
+        try:
+            video = download_file(
+                video_url,
+                retry=2,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                max_bytes=self.finder_feed_max_bytes,
+                expected_kind="video",
+                require_https=True,
+            ) if video_url else None
+        except Exception as error:
+            self.logger.warning("视频号视频直取失败: job=%s reason=%s", job_id, type(error).__name__)
+            video = None
+        if video is None:
+            resolved = resolve_feed(feed.object_id, feed.object_nonce_id)
+            if resolved:
+                try:
+                    video = download_file(
+                        resolved.get("video_url", ""),
+                        retry=1,
+                        allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                        max_bytes=self.finder_feed_max_bytes,
+                        expected_kind="video",
+                        require_https=True,
+                    ) if resolved.get("video_url") else None
+                    cover_url = cover_url or resolved.get("cover_url", "")
+                except Exception as error:
+                    self.logger.warning("视频号私有解析结果不可用: job=%s reason=%s", job_id, type(error).__name__)
+        if video is not None:
+            self._finder_feed_message(
+                "video", video, caption, runtime["chat"], runtime["author"], runtime["source_uid"], job_id
+            )
+            self.finder_feed_job_store.finish(job_id, "sent")
+            return
+
+        try:
+            cover = download_file(
+                cover_url,
+                retry=1,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                max_bytes=min(self.finder_feed_max_bytes, 32 * 1024 * 1024),
+                expected_kind="image",
+                require_https=True,
+            ) if cover_url else None
+        except Exception as error:
+            self.logger.warning("视频号封面获取失败: job=%s reason=%s", job_id, type(error).__name__)
+            cover = None
+        if cover is not None:
+            self._finder_feed_message(
+                "image", cover, f"{caption}\n\n视频暂时无法获取，已发送封面。",
+                runtime["chat"], runtime["author"], runtime["source_uid"], job_id
+            )
+            self.finder_feed_job_store.finish(job_id, "sent", "video_unavailable")
+            return
+        message = efb_text_simple_wrapper(
+            f"{caption}\n\n视频暂时无法获取，请在微信端重新转发后再试。"
+        )
+        message.target = Message(uid=MessageID(runtime["source_uid"]), chat=runtime["chat"])
+        self.send_efb_msgs(
+            message,
+            author=runtime["author"],
+            chat=runtime["chat"],
+            uid=MessageID(f"{runtime['source_uid']}:finder:{job_id}"),
+        )
+        self.finder_feed_job_store.finish(job_id, "failed", "media_unavailable")
 
     def queue_file_message(self, path, msg, author, chat):
         record = build_pending_file_record(
@@ -784,7 +1271,7 @@ class ComWeChatChannel(SlaveChannel):
 
         if content.get("message") == OFFLINE_LOGIN_NOTICE:
             msg.commands = MessageCommands([
-                MessageCommand("关闭提醒", "__delete_message__"),
+                MessageCommand("删除这条消息", "__delete_message__"),
             ])
         elif "commands" in content:
             msg.commands = MessageCommands(content["commands"])
@@ -904,7 +1391,16 @@ class ComWeChatChannel(SlaveChannel):
             self.cache[msg["msgid"]] = msg["type"]
             return
 
-        self.send_efb_msgs(MsgWrapper(msg, MsgProcess(msg, chat)), author=author, chat=chat, uid=MessageID(str(msg['msgid'])))
+        efb_msgs = MsgProcess(msg, chat)
+        message_list = [efb_msgs] if isinstance(efb_msgs, Message) else (efb_msgs or [])
+        for efb_msg in message_list:
+            self._enqueue_finder_feed(msg, efb_msg, author, chat)
+        self.send_efb_msgs(
+            MsgWrapper(msg, efb_msgs),
+            author=author,
+            chat=chat,
+            uid=MessageID(str(msg['msgid'])),
+        )
         self.cache[msg["msgid"]] = msg["type"]
 
     def handle_file_msg(self):
@@ -927,8 +1423,18 @@ class ComWeChatChannel(SlaveChannel):
                     if msg["type"] == "image" and msg.get("thumb_path"):
                         thumb_path = msg["thumb_path"].replace("\\", "/")
                         thumb_path = f"{self.dir}{thumb_path}"
-                    full_image_exists = os.path.exists(path)
+                    path_state = media_path_state(path)
+                    full_image_exists = path_state == "ready"
                     full_media_ready = full_image_exists
+                    if path_state == "invalid":
+                        if msg["type"] != "text":
+                            msg_type = msg["type"]
+                            msg["message"] = (
+                                f"[{msg_type} 附件路径无效，无法转发；请在微信端查看]"
+                            )
+                            msg["type"] = "text"
+                            msg["filepath"] = ""
+                        flag = True
                     if full_image_exists and msg.get("wait_for_stable_media"):
                         try:
                             (
@@ -946,7 +1452,7 @@ class ComWeChatChannel(SlaveChannel):
                         except OSError:
                             full_media_ready = False
                     thumbnail_exists = bool(
-                        thumb_path and os.path.exists(thumb_path)
+                        thumb_path and media_path_state(thumb_path) == "ready"
                     )
                     elapsed_seconds = int(time.time()) - msg["timestamp"]
                     timeout_seconds = media_wait_timeout(
@@ -1081,28 +1587,57 @@ class ComWeChatChannel(SlaveChannel):
                     self.GetContactListBySql()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
-                login_transition = offline_notification.observe_login_transition(
-                    logged_in
+                wall_now = int(time.time())
+                qr_records = self.login_qr_store.records()
+                manual_login_pending = self.manual_login_session.active(wall_now)
+                qr_transition_pending = (
+                    self.login_qr_in_progress.is_set()
+                    or manual_login_pending
+                    or has_active_qr(
+                        qr_records,
+                        now=wall_now,
+                        ttl_seconds=self.login_qr_ttl_seconds,
+                    )
                 )
-                self.revoke_login_qrcodes(completed=logged_in)
-                auto_recovery_announced = False
-                if logged_in and self.watchdog_recovery_success_path.exists():
-                    self.after_login()
-                    auto_recovery_announced = self.announce_watchdog_recovery_success()
-                if (
-                    login_transition
-                    and self.wxid is None
-                    and not auto_recovery_announced
-                    and not self.watchdog_recovery_success_path.exists()
-                ):
-                    self.after_login()
-                    self._send_login_confirmation("登录成功")
+                if logged_in:
+                    logged_in = self.is_login_stable()
+                    if not logged_in:
+                        self.logger.warning("登录状态未连续通过校验，暂不发送成功通知")
+                if not logged_in and qr_transition_pending:
+                    self.logger.info(
+                        "登录二维码确认期内暂停离线通知和自动恢复触发"
+                    )
+                    continue
+                offline_notification.observe_login_transition(logged_in)
+                if logged_in:
+                    if self.wxid is None:
+                        try:
+                            self.confirm_login()
+                        except Exception as error:
+                            self.logger.warning(
+                                "登录状态已稳定但身份确认尚未完成，下一轮重试: %s",
+                                error,
+                            )
+                    else:
+                        self.session_events.observe(True)
+                        self.manual_login_session.clear()
+                        self.revoke_login_qrcodes(completed=True)
+                        if self.watchdog_recovery_success_path.exists():
+                            self.announce_watchdog_recovery_success()
+                    continue
+
+                self.session_events.observe(False)
+                self.revoke_login_qrcodes(completed=False)
+                recovery_event = offline_notification.observe_recovery_event(logged_in)
                 if offline_notification.observe(logged_in, time.monotonic()):
                     self.wxid = None
-                    try:
-                        notify_watchdog()
-                    except Exception as error:
-                        self.logger.warning("Unable to trigger login watchdog: %s", error)
+                    if recovery_event:
+                        try:
+                            notify_watchdog()
+                        except Exception as error:
+                            self.logger.warning(
+                                "Unable to trigger login watchdog: %s", error
+                            )
                     self.system_msg(content)
 
     #获取全部联系人
@@ -1129,7 +1664,7 @@ class ComWeChatChannel(SlaveChannel):
             pass     # todo
 
         if self.wxid is None:
-            if self.is_login():
+            if self.is_login_stable():
                 self.after_login()
             else:
                 content = {
@@ -1428,6 +1963,13 @@ class ComWeChatChannel(SlaveChannel):
             return None
 
     def poll(self):
+        self.finder_feed_stop_event.clear()
+        self.finder_feed_worker_thread = threading.Thread(
+            target=self._finder_feed_worker,
+            name="finder-feed-worker",
+            daemon=True,
+        )
+        self.finder_feed_worker_thread.start()
         timer = threading.Thread(target = self.scheduled_job)
         timer.daemon = True
         timer.start()
@@ -1449,6 +1991,10 @@ class ComWeChatChannel(SlaveChannel):
         ...
 
     def stop_polling(self):
+        self.finder_feed_stop_event.set()
+        if self.finder_feed_worker_thread and self.finder_feed_worker_thread.is_alive():
+            self.finder_feed_worker_thread.join(timeout=5)
+        self.finder_feed_runtime.clear()
         self.db.stop_worker()
 
     def get_message_by_id(self, chat: 'Chat', msg_id: MessageID) -> Optional['Message']:

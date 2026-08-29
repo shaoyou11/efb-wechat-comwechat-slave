@@ -14,9 +14,26 @@ from ehforwarderbot.types import MessageID
 from .ChatMgr import ChatMgr
 from .CustomTypes import EFBGroupChat, EFBPrivateChat
 from .Utils import download_file
-from .finder_feed import parse_finder_feed
+from .finder_feed import (
+    VIDEO_MEDIA_ALLOWED_HOSTS,
+    FinderFeed,
+    parse_finder_feed,
+)
 
 QUOTE_DIVIDER = " - - - - - - - - - - - - - - - "
+
+
+def _xml_text(xml, path: str, default: str = "") -> str:
+    value = xml.xpath(f"string({path})")
+    return str(value or default).strip()
+
+
+def _readable_description(value: str) -> str:
+    if not value:
+        return ""
+    text = re.sub(r"<a\b[^>]*>(.*?)</a>", r"\1（请在微信内操作）", value,
+                  flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"<[^>]+>", "", text).strip()
 
 def qutoed_text(qutoed_text: str, text: str, prefix: str = "") -> str:
     if QUOTE_DIVIDER in qutoed_text:
@@ -155,28 +172,48 @@ def efb_video_wrapper(file: IO, filename: str = None, text: str = None) -> Messa
     return efb_msg
 
 
+def finder_feed_caption(feed: FinderFeed) -> str:
+    lines = ["【微信视频号】"]
+    if feed.author:
+        lines.append(f"作者：{feed.author}")
+    if feed.duration_seconds is not None:
+        lines.append(f"时长：{feed.duration_seconds} 秒")
+    if feed.description:
+        lines.extend(["", feed.description])
+    if feed.share_url:
+        lines.extend(["", f"打开视频号：{feed.share_url}"])
+    return "\n".join(lines)
+
+
 def efb_finder_feed_wrapper(
     xml_text: str,
     downloader=download_file,
+    defer_video: bool = True,
+    cover_only: bool = False,
 ) -> Message:
     feed = parse_finder_feed(xml_text)
     if feed is None:
         return efb_text_simple_wrapper("无法解析微信视频号分享")
 
-    lines = ["微信视频号分享"]
-    if feed.author:
-        lines.append(f"作者：{feed.author}")
-    if feed.description:
-        lines.append(feed.description)
-    if feed.duration_seconds is not None:
-        lines.append(f"时长：{feed.duration_seconds} 秒")
-    if feed.share_url:
-        lines.append(f"视频号页面：{feed.share_url}")
-    caption = "\n".join(lines)
+    caption = finder_feed_caption(feed)
 
-    if feed.video_url:
+    if defer_video:
+        message = efb_text_simple_wrapper(caption)
+        message.vendor_specific = {"finder_feed": feed.public_metadata}
+        return message
+
+    # Video-channel URLs are short-lived and the current ComWechat version
+    # cannot reliably retrieve the original video.  Keep the legacy path
+    # available for tests and controlled callers, but production can request
+    # a cover-only conversion so the share remains useful and predictable.
+    if feed.video_url and not cover_only:
         try:
-            video = downloader(feed.video_url)
+            video = downloader(
+                feed.video_url,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                expected_kind="video",
+                require_https=True,
+            )
             return efb_video_wrapper(
                 video,
                 filename="wechat-channel.mp4",
@@ -184,17 +221,21 @@ def efb_finder_feed_wrapper(
             )
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "微信视频号视频下载失败，发送视频直链并尝试封面：%s",
-                error,
+                "微信视频号视频下载失败，尝试封面：%s",
+                type(error).__name__,
             )
 
     fallback_caption = caption
-    if feed.video_url:
-        fallback_caption = f"{caption}\n视频直链：{feed.video_url}"
-
+    if cover_only:
+        fallback_caption += "\n\n原视频暂不能直接提取，已保留封面。"
     if feed.cover_url:
         try:
-            cover = downloader(feed.cover_url)
+            cover = downloader(
+                feed.cover_url,
+                allowed_hosts=VIDEO_MEDIA_ALLOWED_HOSTS,
+                expected_kind="image",
+                require_https=True,
+            )
             return efb_image_wrapper(
                 cover,
                 filename="wechat-channel.jpg",
@@ -203,7 +244,7 @@ def efb_finder_feed_wrapper(
         except Exception as error:
             logging.getLogger(__name__).warning(
                 "微信视频号封面下载失败，降级发送文字：%s",
-                error,
+                type(error).__name__,
             )
 
     return efb_text_simple_wrapper(fallback_caption)
@@ -368,9 +409,9 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                         subs = re.findall('<[\s\S]+?>', title)
                         for sub in subs:
                             title = title.replace(sub, '')
-                    url = xml.xpath('/msg/appmsg/url/text()')[0]
+                    url = _xml_text(xml, '/msg/appmsg/url')
                     if len(xml.xpath('/msg/appmsg/des/text()'))!=0:
-                        des = xml.xpath('/msg/appmsg/des/text()')[0]
+                        des = _readable_description(_xml_text(xml, '/msg/appmsg/des'))
                     if len(xml.xpath('/msg/appmsg/thumburl/text()'))!=0:
                         thumburl = xml.xpath('/msg/appmsg/thumburl/text()')[0]
                     if len(xml.xpath('/msg/appinfo/appname/text()'))!=0:
@@ -495,7 +536,10 @@ def efb_share_link_wrapper(message: dict, chat) -> Message:
                 vendor_specific={ "is_forwarded": True }
             )
         elif type == 51: # 视频（微信视频号分享）
-            return efb_finder_feed_wrapper(text)
+            # Direct video URLs are usually expired or version-gated.  Send
+            # the safe cover image immediately instead of exposing a button
+            # that starts a second, unreliable download attempt.
+            return efb_finder_feed_wrapper(text, defer_video=False, cover_only=True)
         elif type == 57: # 引用（回复）消息
             msg = xml.xpath('/msg/appmsg/title/text()')[0]
             refer_msgType = int(xml.xpath('/msg/appmsg/refermsg/type/text()')[0]) # 被引用消息类型
@@ -645,12 +689,13 @@ def efb_qqmail_wrapper(text: str) -> Message:
 
 def efb_miniprogram_wrapper(text: str) -> Message:
     xml = etree.fromstring(text)
-    result_text = ""
-    title = xml.xpath('/msg/appmsg/title/text()')[0]
-    programname = xml.xpath('/msg/appmsg/sourcedisplayname/text()')[0]
-    imgurl = xml.xpath('/msg/appmsg/weappinfo/weappiconurl/text()')[0].strip("<![CDATA[").strip("]]>")
-    url = xml.xpath('/msg/appmsg/url/text()')[0]
-    result_text = f"from: {programname}\n  - - - - - - - - - - - - - - - \n微信小程序信息"
+    title = _xml_text(xml, '/msg/appmsg/title', '未命名小程序')
+    programname = _xml_text(xml, '/msg/appmsg/sourcedisplayname')
+    imgurl = _xml_text(xml, '/msg/appmsg/weappinfo/weappiconurl') or None
+    url = _xml_text(xml, '/msg/appmsg/url')
+    if not url:
+        return Message(type=MsgType.Text, text=f"微信小程序\n{title}")
+    result_text = f"微信小程序\n来源：{programname}" if programname else "微信小程序"
     attribute = LinkAttribute(
         title= f'{title}',
         description= result_text,
