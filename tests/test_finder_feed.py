@@ -191,6 +191,7 @@ def test_finder_feed_wrapper_falls_back_to_cover_with_link(monkeypatch):
     assert message.filename == "wechat-channel.jpg"
     assert "关于三个老婆" in message.text
     assert "https://channels.weixin.qq.com/web/pages/feed?" in message.text
+    assert "视频直链：https://example.test/video.mp4" in message.text
 
 
 def test_finder_feed_wrapper_falls_back_to_text(monkeypatch):

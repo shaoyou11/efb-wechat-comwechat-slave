@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +13,27 @@ MODULE_PATH = (
 SPEC = importlib.util.spec_from_file_location("pending_files", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def _channel_class():
+    if "wechatrobot" not in sys.modules:
+        sys.modules["wechatrobot"] = types.SimpleNamespace(WeChatRobot=object)
+    if "yaml" not in sys.modules:
+        sys.modules["yaml"] = types.SimpleNamespace(full_load=lambda _handle: {})
+    if "pilk" not in sys.modules:
+        sys.modules["pilk"] = types.SimpleNamespace(decode=lambda *_args: None)
+    if "magic" not in sys.modules:
+        sys.modules["magic"] = types.SimpleNamespace(from_file=lambda *_args: "")
+    if "rich" not in sys.modules:
+        rich = types.ModuleType("rich")
+        rich.print = print
+        rich_console = types.ModuleType("rich.console")
+        rich_console.Console = object
+        sys.modules["rich"] = rich
+        sys.modules["rich.console"] = rich_console
+    from efb_wechat_comwechat_slave.ComWechat import ComWeChatChannel
+
+    return ComWeChatChannel
 
 
 def test_pending_file_store_survives_reload(tmp_path):
@@ -82,3 +105,45 @@ def test_pending_store_serializes_unexpected_values_safely(tmp_path):
 
     restored = MODULE.PendingFileStore(path).items()
     assert restored[0][1]["msg"]["unexpected"] == "bytes"
+
+
+def test_pending_file_can_be_requested_for_immediate_delivery(tmp_path):
+    ComWeChatChannel = _channel_class()
+    path = tmp_path / "photo.jpg"
+    path.write_bytes(b"image")
+
+    channel = ComWeChatChannel.__new__(ComWeChatChannel)
+    channel.file_msg = {
+        str(path): (
+            {"type": "image", "wait_for_stable_media": True},
+            object(),
+            object(),
+        )
+    }
+    channel.file_retry_at = {str(path): 100}
+
+    assert channel.request_pending_file_delivery(str(path)) == "queued"
+    assert channel.file_retry_at[str(path)] == 0
+    assert channel.file_msg[str(path)][0]["wait_for_stable_media"] is False
+
+
+def test_pending_file_can_be_removed_without_deleting_media():
+    ComWeChatChannel = _channel_class()
+
+    class Store:
+        def __init__(self):
+            self.removed = []
+
+        def remove(self, path):
+            self.removed.append(path)
+
+    store = Store()
+    channel = ComWeChatChannel.__new__(ComWeChatChannel)
+    channel.file_msg = {"/data/photo.jpg": (object(), object(), object())}
+    channel.file_retry_at = {"/data/photo.jpg": 100}
+    channel.pending_file_store = store
+
+    assert channel.remove_pending_file("/data/photo.jpg") == "removed"
+    assert "/data/photo.jpg" not in channel.file_msg
+    assert channel.file_retry_at == {}
+    assert store.removed == ["/data/photo.jpg"]

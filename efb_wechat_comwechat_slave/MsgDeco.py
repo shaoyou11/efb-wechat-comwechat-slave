@@ -171,7 +171,7 @@ def efb_finder_feed_wrapper(
     if feed.duration_seconds is not None:
         lines.append(f"时长：{feed.duration_seconds} 秒")
     if feed.share_url:
-        lines.append(f"视频链接：{feed.share_url}")
+        lines.append(f"视频号页面：{feed.share_url}")
     caption = "\n".join(lines)
 
     if feed.video_url:
@@ -184,9 +184,13 @@ def efb_finder_feed_wrapper(
             )
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "微信视频号视频下载失败，发送视频链接：%s",
+                "微信视频号视频下载失败，发送视频直链并尝试封面：%s",
                 error,
             )
+
+    fallback_caption = caption
+    if feed.video_url:
+        fallback_caption = f"{caption}\n视频直链：{feed.video_url}"
 
     if feed.cover_url:
         try:
@@ -194,7 +198,7 @@ def efb_finder_feed_wrapper(
             return efb_image_wrapper(
                 cover,
                 filename="wechat-channel.jpg",
-                text=caption,
+                text=fallback_caption,
             )
         except Exception as error:
             logging.getLogger(__name__).warning(
@@ -202,7 +206,7 @@ def efb_finder_feed_wrapper(
                 error,
             )
 
-    return efb_text_simple_wrapper(caption)
+    return efb_text_simple_wrapper(fallback_caption)
 
 def efb_file_wrapper(file: IO, filename: str = None, text: str = None) -> Message:
     """

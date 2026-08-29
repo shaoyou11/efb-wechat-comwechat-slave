@@ -62,8 +62,10 @@ from .media_recovery import (
     media_wait_timeout,
     observe_media_file_size,
     should_request_original_media,
+    should_use_historical_fallback,
     should_use_thumbnail,
 )
+from .sent_message import should_ignore_sent_msg
 from .pending_files import (
     PendingFileStore,
     build_pending_file_record,
@@ -76,6 +78,13 @@ from rich.console import Console
 from rich import print as rprint
 from io import BytesIO
 from PIL import Image
+
+
+OFFLINE_LOGIN_NOTICE = (
+    "检测到微信未登录，请发送 /login 获取登录二维码，或发送 /wechat "
+    "打开微信管理"
+)
+
 
 class ComWeChatChannel(SlaveChannel):
     channel_name : str = "ComWechatChannel"
@@ -197,6 +206,14 @@ class ComWeChatChannel(SlaveChannel):
                 author = chat.self
 
             self.handle_msg(msg , author , chat)
+
+        @self.bot.on("sent_msg")
+        def on_sent_msg(msg: Dict):
+            if should_ignore_sent_msg(msg):
+                self.logger.debug(
+                    "忽略微信电脑端发送回环消息: msgid=%s",
+                    msg.get("msgid"),
+                )
 
         @self.bot.on("friend_msg")
         @update_contacts_wrapper
@@ -573,6 +590,15 @@ class ComWeChatChannel(SlaveChannel):
         self.get_me()
         self.GetContactListBySql()
         self.GetGroupListBySql()
+        master = getattr(coordinator, "master", None)
+        cleanup = getattr(master, "cleanup_same_day_offline_notices", None)
+        if callable(cleanup):
+            try:
+                removed = cleanup()
+                if removed:
+                    self.logger.info("登录成功后清理当天微信未登录提醒: %s 条", removed)
+            except Exception as error:
+                self.logger.warning("清理当天微信未登录提醒失败: %s", error)
 
     def revoke_login_qrcodes(self, completed=False):
         if getattr(coordinator, "master", None) is None:
@@ -679,6 +705,35 @@ class ComWeChatChannel(SlaveChannel):
             path,
         )
 
+    def request_pending_file_delivery(self, path):
+        """Allow the EFB operations panel to release one pending attachment."""
+        path = str(path)
+        pending = self.file_msg.get(path)
+        if pending is None:
+            return "not_found"
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                return "not_ready"
+        except OSError:
+            return "not_ready"
+        msg = pending[0]
+        msg["wait_for_stable_media"] = False
+        msg.pop("_media_observed_size", None)
+        msg.pop("_media_stable_since", None)
+        self.file_retry_at[path] = 0
+        self.logger.info("手动释放待发文件: path=%s", path)
+        return "queued"
+
+    def remove_pending_file(self, path):
+        """Remove one pending attachment from memory and its durable index."""
+        path = str(path)
+        if self.file_msg.pop(path, None) is None:
+            return "not_found"
+        self.file_retry_at.pop(path, None)
+        self.pending_file_store.remove(path)
+        self.logger.info("手动删除待发文件记录: path=%s", path)
+        return "removed"
+
     def restore_pending_file_messages(self):
         restored = 0
         for path, record in self.pending_file_store.items():
@@ -727,7 +782,11 @@ class ComWeChatChannel(SlaveChannel):
         except KeyError:
             author = chat.add_system_member()
 
-        if "commands" in content:
+        if content.get("message") == OFFLINE_LOGIN_NOTICE:
+            msg.commands = MessageCommands([
+                MessageCommand("关闭提醒", "__delete_message__"),
+            ])
+        elif "commands" in content:
             msg.commands = MessageCommands(content["commands"])
         if "message" in content:
             msg.text = content['message']
@@ -758,12 +817,20 @@ class ComWeChatChannel(SlaveChannel):
 
         try:
             original_timestamp = msg.get("timestamp")
+            force_original_historical = (
+                self.config.get("force_original_media_download", True)
+                and self.config.get(
+                    "force_original_historical_media_download",
+                    True,
+                )
+            )
             if (
                 self.config.get("force_original_media_download", True)
                 and should_request_original_media(
                     msg["type"],
                     original_timestamp,
                     self.started_at,
+                    allow_historical=force_original_historical,
                 )
             ):
                 try:
@@ -795,8 +862,12 @@ class ComWeChatChannel(SlaveChannel):
             if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
                 msg["timestamp"] = int(time.time())
                 msg["historical_media"] = (
-                    msg["type"] in ("image", "voice")
-                    and is_historical_media(original_timestamp, self.started_at)
+                    should_use_historical_fallback(
+                        msg["type"],
+                        original_timestamp,
+                        self.started_at,
+                        force_original_retry=force_original_historical,
+                    )
                 )
                 msg["filepath"] = msg["filepath"].replace("\\","/")
                 msg["filepath"] = f'''{self.dir}{msg["filepath"]}'''
@@ -846,9 +917,12 @@ class ComWeChatChannel(SlaveChannel):
                         continue
                     flag = False
                     should_send = True
-                    msg = self.file_msg[path][0]
-                    author = self.file_msg[path][1]
-                    chat = self.file_msg[path][2]
+                    pending = self.file_msg.get(path)
+                    if pending is None:
+                        continue
+                    msg = pending[0]
+                    author = pending[1]
+                    chat = pending[2]
                     thumb_path = ""
                     if msg["type"] == "image" and msg.get("thumb_path"):
                         thumb_path = msg["thumb_path"].replace("\\", "/")
@@ -917,7 +991,7 @@ class ComWeChatChannel(SlaveChannel):
 
                     if flag:
                         if not should_send:
-                            del self.file_msg[path]
+                            self.file_msg.pop(path, None)
                             self.file_retry_at.pop(path, None)
                             self.pending_file_store.remove(path)
                             continue
@@ -941,7 +1015,7 @@ class ComWeChatChannel(SlaveChannel):
                                 path,
                             )
                         else:
-                            del self.file_msg[path]
+                            self.file_msg.pop(path, None)
                             self.file_retry_at.pop(path, None)
                             self.pending_file_store.remove(path)
                             status = (
