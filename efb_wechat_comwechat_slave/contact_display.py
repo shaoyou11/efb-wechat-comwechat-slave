@@ -16,7 +16,7 @@ SYSTEM_CONTACT_NAMES = {
 }
 
 TECHNICAL_ID_PATTERN = re.compile(
-    r"^(?:(?:gh_|wxid_|v1_).+|[^@\s]+@(?:kefu\.)?openim)$",
+    r"^(?:(?:gh_|wxid_|v1_).+|[^@\s]+@(?:chatroom|(?:kefu\.)?openim))$",
     re.IGNORECASE,
 )
 MENTION_ALIAS_PATTERN = re.compile(r"^@([^\u2005\r\n]+?)(?:\u2005|\s|$)")
@@ -31,6 +31,40 @@ def extract_mentioned_alias(message: str) -> Optional[str]:
 def _is_technical_name(wxid: str, name: Optional[str]) -> bool:
     value = (name or "").strip()
     return not value or value == wxid or value in SYSTEM_CONTACT_NAMES or bool(TECHNICAL_ID_PATTERN.match(value))
+
+
+def is_technical_contact_id(wxid: str) -> bool:
+    """Return whether a WeChat ID is unsuitable as a lasting display name."""
+    return bool(TECHNICAL_ID_PATTERN.match(str(wxid or "")))
+
+
+def should_publish_resolved_name(
+    wxid: str,
+    cached_name: Optional[str],
+    resolved_name: Optional[str],
+) -> bool:
+    """Return whether a resolved name replaces a technical cached value."""
+    resolved = (resolved_name or "").strip()
+    cached = (cached_name or "").strip()
+    return bool(resolved) and resolved != wxid and resolved != cached and is_technical_contact_id(wxid)
+
+
+def should_force_name_sync(
+    wxid: str,
+    previous_name: Optional[str],
+    resolved_name: Optional[str],
+) -> bool:
+    """Force a topic rename only when a cached technical name was replaced."""
+    previous = (previous_name or "").strip()
+    resolved = (resolved_name or "").strip()
+    return (
+        bool(previous)
+        and is_technical_contact_id(wxid)
+        and _is_technical_name(wxid, previous)
+        and bool(resolved)
+        and resolved != wxid
+        and resolved != previous
+    )
 
 
 def resolve_contact_name(

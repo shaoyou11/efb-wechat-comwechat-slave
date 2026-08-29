@@ -65,9 +65,13 @@ from .login_confirmation import (
 )
 from .contact_display import (
     extract_mentioned_alias,
+    is_technical_contact_id,
     resolve_contact_name,
+    should_force_name_sync,
+    should_publish_resolved_name,
     update_existing_chat_name,
 )
+from .contact_aliases import ContactAliasStore
 from .command_validation import chatroom_member_ids, group_command_error
 from .media_recovery import (
     cdn_media_path,
@@ -163,6 +167,8 @@ class ComWeChatChannel(SlaveChannel):
         self.db: DatabaseManager = DatabaseManager(self)
         self.bot = WeChatRobot()
         self.login_confirmation = LoginConfirmation()
+        self._contact_name_update_lock = threading.RLock()
+        self._published_contact_names = set()
         self.started_at = int(time.time())
         self.historical_media_notice_sent = False
         self.cache = TTLCache(maxsize=200, ttl=self.time_out)
@@ -170,6 +176,9 @@ class ComWeChatChannel(SlaveChannel):
         self.file_retry_at = {}
         self.pending_file_store = PendingFileStore(
             Path(config_path).parent / "pending-files.json"
+        )
+        self.contact_alias_store = ContactAliasStore(
+            Path(config_path).parent / "contact-aliases.json"
         )
         self.finder_feed_job_store = FinderFeedJobStore(
             Path(os.getenv(
@@ -969,6 +978,8 @@ class ComWeChatChannel(SlaveChannel):
         efb_msgs = [efb_msgs] if isinstance(efb_msgs, Message) else efb_msgs
         if 'deliver_to' not in kwargs:
             kwargs['deliver_to'] = coordinator.master
+        if kwargs.get('deliver_to') is None:
+            raise EFBException("EFB 主频道尚未就绪，保留消息等待重试")
         results = []
         for efb_msg in efb_msgs:
             for k, v in kwargs.items():
@@ -1990,10 +2001,166 @@ class ComWeChatChannel(SlaveChannel):
         ...
 
     def get_name_by_wxid(self, wxid):
+        local_alias = self.contact_alias_store.get_alias(wxid)
+        if local_alias:
+            self.contacts[wxid] = local_alias
+            self._publish_resolved_contact_name(wxid, local_alias)
+            return local_alias
         cached_name = self.contacts.get(wxid, wxid)
         name = resolve_contact_name(wxid, cached_name, lambda contact: self.bot.GetContactBySql(wxid=contact))
         self.contacts[wxid] = name
+        if is_technical_contact_id(wxid) and name != wxid and name not in self.contact_alias_store.history(wxid):
+            self.contact_alias_store.remember(wxid, name)
+        if is_technical_contact_id(wxid) and name != wxid:
+            self._publish_resolved_contact_name(wxid, name)
         return name
+
+    @staticmethod
+    def _technical_display_name(wxid, name) -> bool:
+        value = str(name or "").strip()
+        return not value or value == str(wxid or "").strip() or is_technical_contact_id(value)
+
+    def contact_center_snapshot(self, limit: int = 50) -> Dict[str, List[dict]]:
+        """Return cached unresolved contacts and local aliases without network calls."""
+        known = {}
+        for wxid, name in (self.contacts or {}).items():
+            known[str(wxid)] = {
+                "name": str(name or wxid),
+                "kind": "群聊" if "@chatroom" in str(wxid) else "联系人",
+            }
+        for collection, kind in ((self.friends, "联系人"), (self.groups, "群聊")):
+            for chat in collection or []:
+                wxid = str(getattr(chat, "uid", "") or "").strip()
+                if wxid:
+                    known.setdefault(wxid, {
+                        "name": str(getattr(chat, "name", "") or wxid),
+                        "kind": kind,
+                    })
+        for wxid in self.contact_alias_store.aliases:
+            known.setdefault(wxid, {
+                "name": wxid,
+                "kind": "群聊" if "@chatroom" in wxid else "联系人",
+            })
+
+        unresolved = []
+        aliased = []
+        for wxid, item in sorted(known.items(), key=lambda entry: entry[0].lower()):
+            if not is_technical_contact_id(wxid):
+                continue
+            alias = self.contact_alias_store.get_alias(wxid)
+            record = {
+                "uid": wxid,
+                "kind": item["kind"],
+                "name": item["name"],
+                "history": self.contact_alias_store.history(wxid),
+            }
+            if alias:
+                record["alias"] = alias
+                aliased.append(record)
+            elif self._technical_display_name(wxid, item["name"]):
+                unresolved.append(record)
+        max_items = max(1, int(limit))
+        return {
+            "unresolved": unresolved[:max_items],
+            "aliased": aliased[:max_items],
+        }
+
+    def refresh_contact_center(self, limit: int = 50) -> Dict[str, List[dict]]:
+        self.GetContactListBySql(notify=True)
+        return self.contact_center_snapshot(limit)
+
+    def set_contact_alias(self, wxid: str, alias: str) -> Dict[str, List[dict]]:
+        wxid = str(wxid or "").strip()
+        if not is_technical_contact_id(wxid):
+            raise ValueError("只能为可识别的微信技术标识设置本地别名")
+        current = str(self.contacts.get(wxid, wxid) or wxid).strip()
+        previous_alias = self.contact_alias_store.get_alias(wxid)
+        if previous_alias:
+            history = self.contact_alias_store.history(wxid)
+            current = next((name for name in reversed(history) if name != previous_alias), wxid)
+        if not previous_alias:
+            for chat in (self.friends or []) + (self.groups or []):
+                if str(getattr(chat, "uid", "")) == wxid:
+                    current = str(getattr(chat, "name", "") or current).strip()
+                    break
+        display_name = self.contact_alias_store.set_alias(wxid, alias, previous_name=current)
+        self.contacts[wxid] = display_name
+        self._publish_resolved_contact_name(wxid, display_name)
+        return self.contact_center_snapshot()
+
+    def clear_contact_alias(self, wxid: str) -> Dict[str, List[dict]]:
+        wxid = str(wxid or "").strip()
+        previous = self.contact_alias_store.get_alias(wxid)
+        history = self.contact_alias_store.history(wxid)
+        if not self.contact_alias_store.clear_alias(wxid, current_name=previous):
+            raise ValueError("未找到该联系人的本地别名")
+        source_history = [name for name in history if name != previous]
+        restored = source_history[-1] if source_history else wxid
+        self.contacts[wxid] = restored
+        if restored != wxid:
+            self._publish_resolved_contact_name(wxid, restored)
+        return self.contact_center_snapshot()
+
+    def _publish_resolved_contact_name(self, wxid, name):
+        """Keep the slave chat list and existing Telegram topic in sync."""
+        name = str(name or "").strip()
+        wxid = str(wxid or "").strip()
+        if not should_publish_resolved_name(wxid, wxid, name):
+            return
+
+        chats = self.groups if "@chatroom" in wxid else self.friends
+        new_chats = []
+        modified_chats = []
+        with self._contact_name_update_lock:
+            existing = next((chat for chat in chats if chat.uid == wxid), None)
+            if existing is None:
+                entity = EFBGroupChat(uid=wxid, name=name) if "@chatroom" in wxid else EFBPrivateChat(
+                    uid=wxid,
+                    name=name,
+                )
+                chats.append(
+                    ChatMgr.build_efb_chat_as_group(entity)
+                    if "@chatroom" in wxid
+                    else ChatMgr.build_efb_chat_as_private(entity)
+                )
+                new_chats.append(wxid)
+            elif existing.name != name:
+                existing.name = name
+                modified_chats.append(wxid)
+
+            update_key = (wxid, name)
+            if update_key in self._published_contact_names:
+                return
+
+        if getattr(coordinator, "master", None) is None:
+            return
+
+        try:
+            status = ChatUpdates(
+                channel=self,
+                new_chats=new_chats,
+                modified_chats=modified_chats or ([] if new_chats else [wxid]),
+            )
+            status.force_name_sync = {wxid}
+            coordinator.send_status(status)
+        except Exception as error:
+            self.logger.warning("Unable to publish resolved contact name for %s: %s", wxid, error)
+            return
+
+        with self._contact_name_update_lock:
+            self._published_contact_names.add(update_key)
+
+    def non_blocking_lock_wrapper(lock: threading.Lock) :
+        def wrapper(func):
+            def inner(*args, **kwargs):
+                if not lock.acquire(False):
+                    return
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    lock.release()
+            return inner
+        return wrapper
 
     @non_blocking_lock_wrapper(contact_update_lock)
     def get_me(self):
@@ -2022,11 +2189,25 @@ class ComWeChatChannel(SlaveChannel):
     def GetContactListBySql(self, notify: bool = True):
         new_chats = []
         modified_chats = []
+        resolved_name_updates = []
         contacts = self.bot.GetContactListBySql()
         for contact in contacts:
             data = contacts[contact]
+            existing_chat = next(
+                (chat for chat in (self.groups if "@chatroom" in contact else self.friends)
+                 if chat.uid == contact),
+                None,
+            )
+            previous_name = self.contacts.get(contact)
+            if previous_name is None and existing_chat is not None:
+                previous_name = existing_chat.name
             name = (f"{data['remark']}({data['nickname']})") if data["remark"] else data["nickname"]
             name = resolve_contact_name(contact, name, lambda wxid: self.bot.GetContactBySql(wxid=wxid))
+            if is_technical_contact_id(contact) and name != contact and name not in self.contact_alias_store.history(contact):
+                self.contact_alias_store.remember(contact, name)
+            name = self.contact_alias_store.get_alias(contact) or name
+            if should_force_name_sync(contact, previous_name, name):
+                resolved_name_updates.append(contact)
 
             self.contacts[contact] = name
             self.nicknames[contact] = data["nickname"]
@@ -2059,7 +2240,9 @@ class ComWeChatChannel(SlaveChannel):
                     new_chats.append(contact)
 
         if notify and (new_chats or modified_chats):
-            coordinator.send_status(ChatUpdates(channel=self, new_chats=new_chats, modified_chats=modified_chats))
+            status = ChatUpdates(channel=self, new_chats=new_chats, modified_chats=modified_chats)
+            status.force_name_sync = set(resolved_name_updates)
+            coordinator.send_status(status)
 
     def load(self):
         rows = self.db.get_all_group_aliases()
