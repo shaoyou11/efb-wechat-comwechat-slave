@@ -5,6 +5,7 @@ import re
 ROOT = Path(__file__).parents[1]
 WORKFLOW = (ROOT / ".github/workflows/build-image.yml").read_text(encoding="utf-8")
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+SETUP = (ROOT / "setup.py").read_text(encoding="utf-8")
 
 
 def test_canary_tests_current_source_without_publishing():
@@ -32,3 +33,7 @@ def test_image_installs_checkout_instead_of_upstream_self_repo():
     assert "COPY . /src" in DOCKERFILE
     assert "pip3 install /src" in DOCKERFILE
     assert "github.com/0honus0/efb-wechat-comwechat-slave" not in DOCKERFILE
+
+
+def test_runtime_imports_are_declared():
+    assert '"rich"' in SETUP

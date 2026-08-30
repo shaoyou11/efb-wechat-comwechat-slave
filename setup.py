@@ -26,6 +26,7 @@ setup(
         "PyYaml>=5.3",
         "cachetools",
         "requests",
+        "rich",
         "peewee",
         "python-magic",
         "lxml",
