@@ -55,7 +55,6 @@ from .finder_feed_jobs import FinderFeedJobStore
 from .wechat_recall import build_wechat_recall_metadata
 from .finder_resolver import resolve_feed
 from .db import DatabaseManager
-from .Constant import QUOTE_MESSAGE
 from .offline_notification import OfflineNotificationPolicy
 from .offline_trigger import notify_watchdog
 from .login_confirmation import (
@@ -99,6 +98,11 @@ from .login_qr import (
 )
 from .member_avatar_marker import MemberAvatarMarkerStore
 from .session_events import SessionEventStore
+from .wechat_actions import (
+    WechatActionError,
+    mark_chat_read,
+    send_native_quote_or_fallback,
+)
 
 from rich.console import Console
 from rich import print as rprint
@@ -1907,44 +1911,27 @@ class ComWeChatChannel(SlaveChannel):
     def send_text(self, wxid: ChatID, msg: Message) -> 'Message':
         text = msg.text
         if isinstance(msg.target, Message):
-                if isinstance(msg.target.author, SelfChatMember) and isinstance(msg.target.deliver_to, SlaveChannel):
-                    qt_txt = msg.target.text or msg.target.type.name
-                    text = qutoed_text(qt_txt, msg.text)
-                else:
-                    msgid = msg.target.uid
-                    sender = msg.target.author.uid
-                    displayname = self.group_members.get(wxid,{}).get(sender, self.get_nickname_by_wxid(sender))
-                    content = escape(msg.target.vendor_specific.get("wx_xml", ""), {
-                        "\n": "&#x0A;",
-                        "\t": "&#x09;",
-                        '"': "&quot;",
-                    }) or msg.target.text
-                    comwechat_info = msg.target.vendor_specific.get("comwechat_info", {})
-                    if comwechat_info.get("type", None) == "animatedsticker":
-                        refer_type = 47
-                    elif msg.target.type == MsgType.Image:
-                        refer_type = 3
-                    elif msg.target.type == MsgType.Voice:
-                        refer_type = 34
-                    elif msg.target.type == MsgType.Video:
-                        refer_type = 43
-                    elif msg.target.type == MsgType.Sticker:
-                        refer_type = 47
-                    elif msg.target.type == MsgType.Location:
-                        refer_type = 48
-                    elif msg.target.type == MsgType.File:
-                        refer_type = 49
-                    elif comwechat_info.get("type", None) == "share":
-                        refer_type = 49
-                    else:
-                        refer_type = 1
-                    if content:
-                        content = "<content>%s</content>" % content
-                    else:
-                        content = "<content />"
-                    xml = QUOTE_MESSAGE % (self.wxid, text, refer_type, msgid, sender, sender, displayname, content)
-                    return self.bot.SendXml(wxid = wxid , xml = xml, img_path = "")
+            qt_txt = msg.target.text or msg.target.type.name
+            if isinstance(msg.target.author, SelfChatMember) and isinstance(
+                msg.target.deliver_to, SlaveChannel
+            ):
+                text = qutoed_text(qt_txt, msg.text)
+            else:
+                fallback_text = qutoed_text(qt_txt, msg.text)
+                return send_native_quote_or_fallback(
+                    self.bot,
+                    wxid,
+                    msg.text,
+                    msg.target.uid,
+                    lambda: self.bot.SendText(wxid=wxid, msg=fallback_text),
+                )
         return self.bot.SendText(wxid = wxid , msg = text)
+
+    def mark_wechat_read(self, chat_uid: ChatID) -> Dict:
+        try:
+            return mark_chat_read(self.bot, chat_uid)
+        except WechatActionError as error:
+            raise EFBMessageError(str(error)) from error
 
     def get_chat_picture(self, chat: 'Chat') -> BinaryIO:
         wxid = chat.uid

@@ -1,83 +1,68 @@
-name: Build and push ehforwarderbot Docker image
+name: CI
 
-# Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
 on:
   workflow_dispatch:
-  release:
-    types: [published]
   pull_request:
     branches: [master]
-    paths:
-      - "Dockerfile"
-      - "efb_wechat_comwechat_slave/**"
-      - "tests/**"
-      - ".github/workflows/build-image.yml"
+  push:
+    branches: [master]
 
+permissions:
+  contents: read
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Test current source
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pytest
+          pytest -q
+
   canary:
     if: github.event_name == 'pull_request'
+    needs: test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: docker/setup-buildx-action@v3
-    - name: Build canary without publishing
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Dockerfile
-        platforms: linux/amd64
-        push: false
-        tags: ghcr.io/shaoyou11/efb-wechat-comwechat-slave:canary
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build amd64 canary without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: ghcr.io/shaoyou11/efb-wechat-comwechat-slave:canary
 
-  # This workflow contains a single job called "build"
-  build:
+  publish:
     if: github.event_name != 'pull_request'
-    # The type of runner that the job will run on
+    needs: test
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
     steps:
-    # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-    - uses: actions/checkout@v3
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v2
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-
-    - name: Login to DockerHub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GHCR_TOKEN }}
-
-    # Runs a single command using the runners shell
-    - name: Build and push Docker images to docker.io and ghcr.io
-      uses: docker/build-push-action@v2
-      with:
-        file: 'Dockerfile'
-        platforms: linux/amd64
-        context: ./
-        push: true
-        tags: |
-          ${{ secrets.DOCKER_USERNAME }}/efb-wechat-comwechat-slave:latest
-          ghcr.io/0honus0/efb-wechat-comwechat-slave:latest
-
-    - name: Docker Hub Description
-      uses: peter-evans/dockerhub-description@v3
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-        repository: ${{ secrets.DOCKER_USERNAME }}/efb-wechat-comwechat-slave
-        readme-filepath: README.md
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build and publish source image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ghcr.io/shaoyou11/efb-wechat-comwechat-slave:latest
