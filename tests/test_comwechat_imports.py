@@ -43,10 +43,11 @@ def test_scheduler_serializes_post_login_confirmation():
     assert len(scheduler_calls) == 1
 
 
-def test_periodic_full_contact_refresh_is_six_hour_fallback():
+def test_periodic_full_contact_refresh_is_daily_fallback():
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert "count % (6 * 60 * 60) == 0" in source
+    assert "count % (24 * 60 * 60) == 0" in source
+    assert "count % (6 * 60 * 60) == 0" not in source
     assert "count % 1800 == 0" not in source
 
 
