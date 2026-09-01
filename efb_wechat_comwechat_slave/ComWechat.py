@@ -1591,7 +1591,7 @@ class ComWeChatChannel(SlaveChannel):
         while True:
             time.sleep(1)
             count += 1
-            if count % 1800 == 0:
+            if count % (6 * 60 * 60) == 0:
                 if self.wxid is not None:
                     self.GetGroupListBySql()
                     self.GetContactListBySql()
@@ -2092,7 +2092,31 @@ class ComWeChatChannel(SlaveChannel):
         }
 
     def refresh_contact_center(self, limit: int = 50) -> Dict[str, List[dict]]:
+        unresolved = self.contact_center_snapshot(limit).get("unresolved", [])
         self.GetContactListBySql(notify=True)
+        now = time.monotonic()
+        for item in unresolved:
+            wxid = str(item.get("uid", "") or "").strip()
+            if not wxid:
+                continue
+            try:
+                name = resolve_contact_name(
+                    wxid,
+                    self.contacts.get(wxid, wxid),
+                    lambda contact: self.bot.GetContactBySql(wxid=contact),
+                )
+            except Exception as error:
+                self.logger.debug("Manual contact refresh failed for %s: %s", wxid, error)
+                self.contact_name_retry_queue.schedule(wxid, now)
+                continue
+            if self._technical_display_name(wxid, name):
+                self.contact_name_retry_queue.schedule(wxid, now)
+                continue
+            self.contacts[wxid] = name
+            if name not in self.contact_alias_store.history(wxid):
+                self.contact_alias_store.remember(wxid, name)
+            self.contact_name_retry_queue.resolved(wxid)
+            self._publish_resolved_contact_name(wxid, name, force=True)
         return self.contact_center_snapshot(limit)
 
     def set_contact_alias(self, wxid: str, alias: str) -> Dict[str, List[dict]]:
@@ -2127,7 +2151,7 @@ class ComWeChatChannel(SlaveChannel):
             self._publish_resolved_contact_name(wxid, restored)
         return self.contact_center_snapshot()
 
-    def _publish_resolved_contact_name(self, wxid, name):
+    def _publish_resolved_contact_name(self, wxid, name, force: bool = False):
         """Keep the slave chat list and existing Telegram topic in sync."""
         name = str(name or "").strip()
         wxid = str(wxid or "").strip()
@@ -2155,7 +2179,7 @@ class ComWeChatChannel(SlaveChannel):
                 modified_chats.append(wxid)
 
             update_key = (wxid, name)
-            if update_key in self._published_contact_names:
+            if update_key in self._published_contact_names and not force:
                 return
 
         if getattr(coordinator, "master", None) is None:
