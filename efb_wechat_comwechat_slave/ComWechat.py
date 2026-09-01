@@ -1591,7 +1591,7 @@ class ComWeChatChannel(SlaveChannel):
         while True:
             time.sleep(1)
             count += 1
-            if count % (6 * 60 * 60) == 0:
+            if count % (24 * 60 * 60) == 0:
                 if self.wxid is not None:
                     self.GetGroupListBySql()
                     self.GetContactListBySql()
@@ -2093,6 +2093,7 @@ class ComWeChatChannel(SlaveChannel):
 
     def refresh_contact_center(self, limit: int = 50) -> Dict[str, List[dict]]:
         unresolved = self.contact_center_snapshot(limit).get("unresolved", [])
+        attempted = len(unresolved)
         self.GetContactListBySql(notify=True)
         now = time.monotonic()
         for item in unresolved:
@@ -2117,7 +2118,15 @@ class ComWeChatChannel(SlaveChannel):
                 self.contact_alias_store.remember(wxid, name)
             self.contact_name_retry_queue.resolved(wxid)
             self._publish_resolved_contact_name(wxid, name, force=True)
-        return self.contact_center_snapshot(limit)
+        snapshot = self.contact_center_snapshot(limit)
+        remaining = len(snapshot.get("unresolved", []))
+        snapshot["refresh"] = {
+            "completed_at": int(time.time()),
+            "attempted": attempted,
+            "resolved": max(0, attempted - remaining),
+            "remaining": remaining,
+        }
+        return snapshot
 
     def set_contact_alias(self, wxid: str, alias: str) -> Dict[str, List[dict]]:
         wxid = str(wxid or "").strip()
