@@ -71,6 +71,7 @@ from .contact_display import (
     update_existing_chat_name,
 )
 from .contact_aliases import ContactAliasStore
+from .contact_name_retry import ContactNameRetryQueue
 from .command_validation import chatroom_member_ids, group_command_error
 from .media_recovery import (
     cdn_media_path,
@@ -183,6 +184,11 @@ class ComWeChatChannel(SlaveChannel):
         )
         self.contact_alias_store = ContactAliasStore(
             Path(config_path).parent / "contact-aliases.json"
+        )
+        self.contact_name_retry_queue = ContactNameRetryQueue(
+            initial_delay=float(self.config.get("contact_name_retry_initial_seconds", 15)),
+            max_delay=float(self.config.get("contact_name_retry_max_seconds", 300)),
+            max_items=int(self.config.get("contact_name_retry_max_items", 256)),
         )
         self.finder_feed_job_store = FinderFeedJobStore(
             Path(os.getenv(
@@ -1589,6 +1595,8 @@ class ComWeChatChannel(SlaveChannel):
                 if self.wxid is not None:
                     self.GetGroupListBySql()
                     self.GetContactListBySql()
+            if count % 5 == 0 and self.wxid is not None:
+                self._retry_unresolved_contact_names()
             if count % 10 == 3 and getattr(coordinator, 'master', None) is not None:
                 logged_in = self.is_login()
                 wall_now = int(time.time())
@@ -1990,17 +1998,48 @@ class ComWeChatChannel(SlaveChannel):
     def get_name_by_wxid(self, wxid):
         local_alias = self.contact_alias_store.get_alias(wxid)
         if local_alias:
+            self.contact_name_retry_queue.resolved(wxid)
             self.contacts[wxid] = local_alias
             self._publish_resolved_contact_name(wxid, local_alias)
             return local_alias
         cached_name = self.contacts.get(wxid, wxid)
         name = resolve_contact_name(wxid, cached_name, lambda contact: self.bot.GetContactBySql(wxid=contact))
         self.contacts[wxid] = name
+        if self._technical_display_name(wxid, name):
+            self.contact_name_retry_queue.schedule(wxid, time.monotonic())
+            return name
+        self.contact_name_retry_queue.resolved(wxid)
         if is_technical_contact_id(wxid) and name != wxid and name not in self.contact_alias_store.history(wxid):
             self.contact_alias_store.remember(wxid, name)
         if is_technical_contact_id(wxid) and name != wxid:
             self._publish_resolved_contact_name(wxid, name)
         return name
+
+    def _retry_unresolved_contact_names(self):
+        now = time.monotonic()
+        for wxid in self.contact_name_retry_queue.due(now):
+            local_alias = self.contact_alias_store.get_alias(wxid)
+            if local_alias:
+                self.contact_name_retry_queue.resolved(wxid)
+                continue
+            try:
+                name = resolve_contact_name(
+                    wxid,
+                    self.contacts.get(wxid, wxid),
+                    lambda contact: self.bot.GetContactBySql(wxid=contact),
+                )
+            except Exception as error:
+                self.logger.debug("Contact name retry failed for %s: %s", wxid, error)
+                self.contact_name_retry_queue.failed(wxid, now)
+                continue
+            if self._technical_display_name(wxid, name):
+                self.contact_name_retry_queue.failed(wxid, now)
+                continue
+            self.contacts[wxid] = name
+            if name not in self.contact_alias_store.history(wxid):
+                self.contact_alias_store.remember(wxid, name)
+            self.contact_name_retry_queue.resolved(wxid)
+            self._publish_resolved_contact_name(wxid, name)
 
     @staticmethod
     def _technical_display_name(wxid, name) -> bool:
@@ -2198,6 +2237,8 @@ class ComWeChatChannel(SlaveChannel):
 
             self.contacts[contact] = name
             self.nicknames[contact] = data["nickname"]
+            if not self._technical_display_name(contact, name):
+                self.contact_name_retry_queue.resolved(contact)
             if data["type"] == 0 or data["type"] == 4:
                 continue
 
