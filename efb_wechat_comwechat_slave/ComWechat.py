@@ -173,6 +173,7 @@ class ComWeChatChannel(SlaveChannel):
         self.bot = WeChatRobot()
         self.login_confirmation = LoginConfirmation()
         self._contact_name_update_lock = threading.RLock()
+        self._contact_lookup_state = {}
         self._published_contact_names = set()
         self.started_at = int(time.time())
         self.historical_media_notice_sent = False
@@ -2003,7 +2004,7 @@ class ComWeChatChannel(SlaveChannel):
             self._publish_resolved_contact_name(wxid, local_alias)
             return local_alias
         cached_name = self.contacts.get(wxid, wxid)
-        name = resolve_contact_name(wxid, cached_name, lambda contact: self.bot.GetContactBySql(wxid=contact))
+        name = resolve_contact_name(wxid, cached_name, self._lookup_contact_record)
         self.contacts[wxid] = name
         if self._technical_display_name(wxid, name):
             self.contact_name_retry_queue.schedule(wxid, time.monotonic())
@@ -2026,7 +2027,7 @@ class ComWeChatChannel(SlaveChannel):
                 name = resolve_contact_name(
                     wxid,
                     self.contacts.get(wxid, wxid),
-                    lambda contact: self.bot.GetContactBySql(wxid=contact),
+                    self._lookup_contact_record,
                 )
             except Exception as error:
                 self.logger.debug("Contact name retry failed for %s: %s", wxid, error)
@@ -2089,6 +2090,8 @@ class ComWeChatChannel(SlaveChannel):
         return {
             "unresolved": unresolved[:max_items],
             "aliased": aliased[:max_items],
+            "unresolved_count": len(unresolved),
+            "aliased_count": len(aliased),
         }
 
     def refresh_contact_center(self, limit: int = 50) -> Dict[str, List[dict]]:
@@ -2104,7 +2107,7 @@ class ComWeChatChannel(SlaveChannel):
                 name = resolve_contact_name(
                     wxid,
                     self.contacts.get(wxid, wxid),
-                    lambda contact: self.bot.GetContactBySql(wxid=contact),
+                    self._lookup_contact_record,
                 )
             except Exception as error:
                 self.logger.debug("Manual contact refresh failed for %s: %s", wxid, error)
@@ -2127,6 +2130,56 @@ class ComWeChatChannel(SlaveChannel):
             "remaining": remaining,
         }
         return snapshot
+
+    def _lookup_contact_record(self, wxid):
+        state = {"queried_at": int(time.time()), "reason": "微信接口未返回可用名称"}
+        try:
+            data = self.bot.GetContactBySql(wxid=wxid)
+            if data and len(data) > 3 and not self._technical_display_name(wxid, data[3]):
+                state["reason"] = "已从微信本地通讯录取得名称"
+                state["source"] = "微信本地通讯录"
+            return data
+        except Exception:
+            state["reason"] = "微信查询接口失败，可稍后重新识别"
+            raise
+        finally:
+            with self._contact_name_update_lock:
+                states = getattr(self, "_contact_lookup_state", {})
+                states.pop(wxid, None)
+                states[wxid] = state
+                while len(states) > 512:
+                    states.pop(next(iter(states)))
+                self._contact_lookup_state = states
+
+    def contact_identity_detail(self, wxid: str, refresh: bool = False) -> dict:
+        wxid = str(wxid or "").strip()
+        if not is_technical_contact_id(wxid):
+            raise ValueError("无效的联系人标识")
+        if wxid not in self.contacts and not any(
+            str(getattr(chat, "uid", "")) == wxid for chat in self.friends + self.groups
+        ) and not self.contact_alias_store.get_alias(wxid):
+            raise ValueError("联系人已不存在，请刷新列表")
+        alias = self.contact_alias_store.get_alias(wxid)
+        state = getattr(self, "_contact_lookup_state", {}).get(wxid, {})
+        if refresh and time.time() - state.get("queried_at", 0) >= 30:
+            name = resolve_contact_name(wxid, wxid, self._lookup_contact_record)
+            if not self._technical_display_name(wxid, name):
+                self.contact_alias_store.remember(wxid, name)
+                self.contacts[wxid] = alias or name
+                self.contact_name_retry_queue.resolved(wxid)
+                self._publish_resolved_contact_name(wxid, alias or name, force=True)
+            else:
+                self.contact_name_retry_queue.schedule(wxid, time.monotonic())
+            state = getattr(self, "_contact_lookup_state", {}).get(wxid, {})
+        name = alias or self.contacts.get(wxid, wxid)
+        resolved = not self._technical_display_name(wxid, name)
+        return {
+            "uid": wxid, "kind": "群聊" if "@chatroom" in wxid else "联系人",
+            "name": name, "alias": alias, "history": self.contact_alias_store.history(wxid),
+            "source": "本地别名" if alias else state.get("source", "微信缓存" if resolved else "标识占位"),
+            "queried_at": state.get("queried_at"), "resolved": resolved,
+            "reason": state.get("reason", "尚无本次运行的单项查询记录"),
+        }
 
     def set_contact_alias(self, wxid: str, alias: str) -> Dict[str, List[dict]]:
         wxid = str(wxid or "").strip()

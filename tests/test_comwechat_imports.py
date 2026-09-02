@@ -69,7 +69,12 @@ def test_manual_contact_refresh_rechecks_unresolved_ids_and_forces_sync():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     ]
 
-    assert any(call.func.attr == "GetContactBySql" for call in calls)
+    assert any(isinstance(node, ast.Attribute) and node.attr == "_lookup_contact_record"
+               for node in ast.walk(method))
+    lookup = next(node for node in comwechat.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "_lookup_contact_record")
+    assert any(isinstance(node, ast.Attribute) and node.attr == "GetContactBySql"
+               for node in ast.walk(lookup))
     publish = next(call for call in calls if call.func.attr == "_publish_resolved_contact_name")
     assert any(
         keyword.arg == "force" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True
