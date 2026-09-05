@@ -22,6 +22,28 @@ select_revoke_uids = MODULE.select_revoke_uids
 
 
 class LoginQrStoreTests(unittest.TestCase):
+    def test_cancel_qr_preserves_login_protection_and_does_not_logout(self):
+        channel = ComWeChatChannel.__new__(ComWeChatChannel)
+        channel.login_qr_lock = threading.RLock()
+        channel.login_qr_store = mock.Mock()
+        channel.login_qr_store.records.return_value = []
+        channel.revoke_login_qrcodes = mock.Mock()
+        channel.manual_login_session = mock.Mock()
+        channel.force_logout = mock.Mock()
+        result = channel.cancel_login_qr()
+        self.assertIn("不会退出微信", result)
+        channel.revoke_login_qrcodes.assert_called_once_with(completed=True)
+        channel.force_logout.assert_not_called()
+        channel.manual_login_session.clear.assert_not_called()
+
+    def test_cancel_qr_reports_partial_failure(self):
+        channel = ComWeChatChannel.__new__(ComWeChatChannel)
+        channel.login_qr_lock = threading.RLock()
+        channel.login_qr_store = mock.Mock()
+        channel.login_qr_store.records.return_value = [{"uid": "qr"}]
+        channel.revoke_login_qrcodes = mock.Mock()
+        self.assertIn("暂未能撤回", channel.cancel_login_qr())
+
     def test_active_qr_expiry_does_not_extend_when_reused(self):
         records = [{"uid": "qr", "created_at": 100, "stack_generation": "a"}]
 

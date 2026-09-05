@@ -941,6 +941,11 @@ class ComWeChatChannel(SlaveChannel):
             msg.path = Path(file.name)
             msg.file = file
             msg.mime = 'image/png'
+            msg.text = (
+                "微信登录二维码\n"
+                f"生成时间：{datetime.now():%m-%d %H:%M:%S}\n"
+                "请使用手机微信扫码；过期后可重新获取。"
+            )
             try:
                 self.send_efb_msgs(
                     msg,
@@ -968,6 +973,19 @@ class ComWeChatChannel(SlaveChannel):
             return "请扫描二维码登录；二维码有效期内请勿重复发送 /login"
         finally:
             self.login_qr_in_progress.clear()
+            self.login_qr_lock.release()
+
+    @efb_utils.extra(name="撤回登录二维码", desc="撤回已发送的二维码，不退出微信")
+    def cancel_login_qr(self, _: str = "") -> str:
+        if not self.login_qr_lock.acquire(blocking=False):
+            return "二维码正在生成，请生成完成后再撤回。"
+        try:
+            self.revoke_login_qrcodes(completed=True)
+            if self.login_qr_store.records():
+                return "部分二维码暂未能撤回，请稍后重试。"
+            # Keep the existing protection window: a scan may already be confirming.
+            return "已收回登录二维码，不会退出微信；已开始的扫码确认不受影响。"
+        finally:
             self.login_qr_lock.release()
 
     @efb_utils.extra(name="强制退出微信",
