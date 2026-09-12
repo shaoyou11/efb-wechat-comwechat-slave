@@ -151,6 +151,48 @@ class LoginQrStoreTests(unittest.TestCase):
         self.assertTrue(has_recent_qr(records, now=120, grace_seconds=30))
         self.assertFalse(has_recent_qr(records, now=130, grace_seconds=30))
 
+    def test_explicit_refresh_replaces_active_qr_only_after_delivery(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory() as directory:
+            channel = ComWeChatChannel.__new__(ComWeChatChannel)
+            channel.login_qr_store = LoginQrStore(Path(directory) / "qr.json")
+            channel.login_qr_store.add("old", created_at=100, stack_generation="a")
+            channel.login_qr_ttl_seconds = 180
+            channel.login_qr_lock = threading.RLock()
+            channel.login_qr_in_progress = threading.Event()
+            channel.login_qr_session_grace_seconds = 60
+            channel.manual_login_session = ManualLoginSessionStore(Path(directory) / "session.json")
+            channel.session_events = mock.Mock()
+            channel.logger = mock.Mock()
+            channel.get_bridge_stack_generation = mock.Mock(return_value="a")
+            channel.is_login_stable = mock.Mock(return_value=False)
+            channel.get_qrcode = mock.Mock(return_value=SimpleNamespace(name="qr.png"))
+            channel.user_auth_chat = SimpleNamespace(other=object())
+            channel.revoke_login_qrcodes = mock.Mock()
+            def delivered(*args, **kwargs):
+                channel.revoke_login_qrcodes.assert_not_called()
+            channel.send_efb_msgs = mock.Mock(side_effect=delivered)
+            with mock.patch("efb_wechat_comwechat_slave.ComWechat.time.time", return_value=200):
+                result = channel.refresh_login_qr()
+            self.assertIn("请扫描二维码", result)
+            channel.get_qrcode.assert_called_once()
+            channel.send_efb_msgs.assert_called_once()
+            channel.revoke_login_qrcodes.assert_any_call(target_uids=["old"])
+            self.assertFalse(channel.login_qr_in_progress.is_set())
+
+    def test_explicit_refresh_does_not_generate_when_already_logged_in(self):
+        channel = ComWeChatChannel.__new__(ComWeChatChannel)
+        channel.get_bridge_stack_generation = mock.Mock(return_value="a")
+        channel.login_qr_store = mock.Mock()
+        channel.login_qr_lock = threading.RLock()
+        channel.login_qr_in_progress = threading.Event()
+        channel.is_login_stable = mock.Mock(return_value=True)
+        channel.after_login = mock.Mock()
+        channel.get_qrcode = mock.Mock()
+        result = channel.refresh_login_qr()
+        self.assertIn("当前已登录", result)
+        channel.get_qrcode.assert_not_called()
+
     def test_reauth_reuses_active_qr_without_calling_wechat_api(self):
         with TemporaryDirectory() as directory:
             channel = ComWeChatChannel.__new__(ComWeChatChannel)
