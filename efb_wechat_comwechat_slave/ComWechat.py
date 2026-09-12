@@ -829,9 +829,13 @@ class ComWeChatChannel(SlaveChannel):
                 removed += 1
             return removed
 
-    @efb_utils.extra(name="重新扫码登录",
-           desc="重新扫码登录")
+    @efb_utils.extra(name="刷新登录二维码", desc="主动生成新的登录二维码")
+    def refresh_login_qr(self, _: str = "") -> str:
+        return self.reauth("refresh")
+
+    @efb_utils.extra(name="重新扫码登录", desc="重新扫码登录")
     def reauth(self, _: str = "") -> str:
+        force_refresh = _ == "refresh"
         try:
             stack_generation = self.get_bridge_stack_generation()
         except Exception as error:
@@ -840,7 +844,7 @@ class ComWeChatChannel(SlaveChannel):
 
         now = int(time.time())
         records = self.login_qr_store.records()
-        if has_active_qr(
+        if not force_refresh and has_active_qr(
             records,
             now=now,
             ttl_seconds=self.login_qr_ttl_seconds,
@@ -872,7 +876,7 @@ class ComWeChatChannel(SlaveChannel):
                 self.logger.warning("生成二维码前微信栈尚未就绪: %s", error)
                 return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
             now = int(time.time())
-            if has_active_qr(
+            if not force_refresh and has_active_qr(
                 self.login_qr_store.records(),
                 now=now,
                 ttl_seconds=self.login_qr_ttl_seconds,
