@@ -180,6 +180,30 @@ class LoginQrStoreTests(unittest.TestCase):
             channel.revoke_login_qrcodes.assert_any_call(target_uids=["old"])
             self.assertFalse(channel.login_qr_in_progress.is_set())
 
+    def test_paused_login_reports_one_failed_recovery(self):
+        from efb_wechat_comwechat_slave.client_recovery import ClientRecoveryPaused
+        channel = ComWeChatChannel.__new__(ComWeChatChannel)
+        channel.supervisor_health_url = "http://localhost/healthz"
+        channel.get_bridge_stack_generation = mock.Mock(
+            side_effect=ClientRecoveryPaused({"state": "paused", "recovery_protocol": 1}))
+        channel.get_qrcode = mock.Mock()
+        with mock.patch("efb_wechat_comwechat_slave.ComWechat.recover_for_login",
+                        return_value="本次重建失败") as recover:
+            self.assertEqual(channel.reauth(), "本次重建失败")
+        recover.assert_called_once()
+        channel.get_qrcode.assert_not_called()
+
+    def test_paused_login_does_not_retry_if_bridge_not_ready(self):
+        from efb_wechat_comwechat_slave.client_recovery import ClientRecoveryPaused
+        channel = ComWeChatChannel.__new__(ComWeChatChannel)
+        channel.supervisor_health_url = "http://localhost/healthz"
+        channel.get_bridge_stack_generation = mock.Mock(side_effect=[
+            ClientRecoveryPaused({"state": "paused", "recovery_protocol": 1}), RuntimeError()])
+        with mock.patch("efb_wechat_comwechat_slave.ComWechat.recover_for_login",
+                        return_value=None) as recover:
+            self.assertIn("未再次发起重建", channel.reauth())
+        recover.assert_called_once()
+
     def test_explicit_refresh_does_not_generate_when_already_logged_in(self):
         channel = ComWeChatChannel.__new__(ComWeChatChannel)
         channel.get_bridge_stack_generation = mock.Mock(return_value="a")
