@@ -1,3 +1,4 @@
+from .client_recovery import ClientRecoveryPaused, recover_for_login
 import logging, tempfile
 import queue
 import time
@@ -609,6 +610,8 @@ class ComWeChatChannel(SlaveChannel):
             timeout=self.bridge_health_timeout_seconds,
         ) as response:
             supervisor = json.loads(response.read().decode("utf-8"))
+        if supervisor.get("state") == "paused":
+            raise ClientRecoveryPaused(supervisor)
         if not supervisor.get("ok") or supervisor.get("state") != "running":
             raise RuntimeError("微信客户端主管正在恢复")
 
@@ -838,6 +841,14 @@ class ComWeChatChannel(SlaveChannel):
         force_refresh = _ == "refresh"
         try:
             stack_generation = self.get_bridge_stack_generation()
+        except ClientRecoveryPaused as error:
+            failure = recover_for_login(self.supervisor_health_url, error.state)
+            if failure:
+                return failure
+            try:
+                stack_generation = self.get_bridge_stack_generation()
+            except Exception:
+                return "微信消息接口尚未就绪，暂时无法生成二维码；未再次发起重建。"
         except Exception as error:
             self.logger.warning("读取微信栈代次失败: %s", error)
             return "微信客户端正在恢复，当前二维码已经失效，请稍后再发送 /login"
