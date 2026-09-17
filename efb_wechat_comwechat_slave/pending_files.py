@@ -1,4 +1,5 @@
 import json
+import copy
 import os
 import stat
 import tempfile
@@ -117,17 +118,59 @@ class PendingFileStore:
 
     def put(self, path: str, record: Dict[str, Any]) -> None:
         with self.lock:
-            self.records[str(path)] = _json_safe(record)
-            self._save()
+            previous = copy.deepcopy(self.records)
+            record = _json_safe(record)
+            if self.records.get(str(path), {}).get("msg", {}).get("_delivery_attempt_started"):
+                record.setdefault("msg", {})["_delivery_attempt_started"] = True
+            self.records[str(path)] = record
+            try:
+                self._save()
+            except Exception:
+                self.records = previous
+                raise
 
     def remove(self, path: str) -> None:
         with self.lock:
+            previous = copy.deepcopy(self.records)
             if self.records.pop(str(path), None) is not None:
+                try:
+                    self._save()
+                except Exception:
+                    self.records = previous
+                    raise
+
+    def begin_delivery(self, path: str) -> bool:
+        """Persist the attempt before external I/O; a crash requires manual release."""
+        with self.lock:
+            record = self.records.get(str(path))
+            if record is None or record.get("msg", {}).get("_delivery_attempt_started"):
+                return False
+            previous = copy.deepcopy(record)
+            record.setdefault("msg", {})["_delivery_attempt_started"] = True
+            try:
                 self._save()
+            except Exception:
+                self.records[str(path)] = previous
+                raise
+            return True
+
+    def release_delivery(self, path: str) -> bool:
+        with self.lock:
+            record = self.records.get(str(path))
+            if record is None:
+                return False
+            previous = copy.deepcopy(record)
+            record.setdefault("msg", {}).pop("_delivery_attempt_started", None)
+            try:
+                self._save()
+            except Exception:
+                self.records[str(path)] = previous
+                raise
+            return True
 
     def items(self):
         with self.lock:
             return [
-                (path, dict(record))
+                (path, copy.deepcopy(record))
                 for path, record in self.records.items()
             ]

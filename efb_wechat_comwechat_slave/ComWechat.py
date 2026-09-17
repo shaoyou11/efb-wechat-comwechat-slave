@@ -1247,7 +1247,10 @@ class ComWeChatChannel(SlaveChannel):
                 return "not_ready"
         except OSError:
             return "not_ready"
+        if not self.pending_file_store.release_delivery(path):
+            return "not_found"
         msg = pending[0]
+        msg.pop("_delivery_attempt_started", None)
         msg["wait_for_stable_media"] = False
         msg.pop("_media_observed_size", None)
         msg.pop("_media_stable_since", None)
@@ -1453,130 +1456,141 @@ class ComWeChatChannel(SlaveChannel):
                 time.sleep(1)
             else:
                 for path in list(self.file_msg.keys()):
-                    if time.time() < self.file_retry_at.get(path, 0):
-                        continue
-                    flag = False
-                    should_send = True
-                    pending = self.file_msg.get(path)
-                    if pending is None:
-                        continue
-                    msg = pending[0]
-                    author = pending[1]
-                    chat = pending[2]
-                    thumb_path = ""
-                    if msg["type"] == "image" and msg.get("thumb_path"):
-                        thumb_path = msg["thumb_path"].replace("\\", "/")
-                        thumb_path = f"{self.dir}{thumb_path}"
-                    path_state = media_path_state(path)
-                    full_image_exists = path_state == "ready"
-                    full_media_ready = full_image_exists
-                    if path_state == "invalid":
-                        if msg["type"] != "text":
-                            msg_type = msg["type"]
-                            msg["message"] = (
-                                f"[{msg_type} 附件路径无效，无法转发；请在微信端查看]"
-                            )
-                            msg["type"] = "text"
-                            msg["filepath"] = ""
-                        flag = True
-                    if full_image_exists and msg.get("wait_for_stable_media"):
-                        try:
-                            (
-                                full_media_ready,
-                                observed_size,
-                                stable_since,
-                            ) = observe_media_file_size(
-                                current_size=os.path.getsize(path),
-                                previous_size=msg.get("_media_observed_size"),
-                                stable_since=msg.get("_media_stable_since"),
-                                now=time.monotonic(),
-                            )
-                            msg["_media_observed_size"] = observed_size
-                            msg["_media_stable_since"] = stable_since
-                        except OSError:
-                            full_media_ready = False
-                    thumbnail_exists = bool(
-                        thumb_path and media_path_state(thumb_path) == "ready"
-                    )
-                    elapsed_seconds = int(time.time()) - msg["timestamp"]
-                    timeout_seconds = media_wait_timeout(
-                        msg.get("historical_media", False)
-                    )
-                    if full_media_ready:
-                        flag = True
-                    elif should_use_thumbnail(
-                        full_image_exists,
-                        thumbnail_exists,
-                        elapsed_seconds,
-                        timeout_seconds,
-                    ):
-                        msg["filepath"] = thumb_path
-                        flag = True
-                    elif elapsed_seconds >= timeout_seconds:
-                        msg_type = msg["type"]
-                        if msg.get("historical_media", False):
-                            if self.historical_media_notice_sent:
-                                should_send = False
-                            else:
+                    try:
+                        if time.time() < self.file_retry_at.get(path, 0):
+                            continue
+                        flag = False
+                        should_send = True
+                        pending = self.file_msg.get(path)
+                        if pending is None:
+                            continue
+                        msg = pending[0]
+                        if msg.get("_delivery_attempt_started"):
+                            continue
+                        author = pending[1]
+                        chat = pending[2]
+                        thumb_path = ""
+                        if msg["type"] == "image" and msg.get("thumb_path"):
+                            thumb_path = msg["thumb_path"].replace("\\", "/")
+                            thumb_path = f"{self.dir}{thumb_path}"
+                        path_state = media_path_state(path)
+                        full_image_exists = path_state == "ready"
+                        full_media_ready = full_image_exists
+                        if path_state == "invalid":
+                            if msg["type"] != "text":
+                                msg_type = msg["type"]
                                 msg["message"] = (
-                                    "[EFB 重启后检测到历史图片或语音附件已失效，"
-                                    "后续重复提示已自动省略，请在手机端查看]"
+                                    f"[{msg_type} 附件路径无效，无法转发；请在微信端查看]"
                                 )
                                 msg["type"] = "text"
-                                self.historical_media_notice_sent = True
-                        else:
-                            msg['message'] = f"[{msg_type} 下载超时,请在手机端查看]"
-                            msg["type"] = "text"
-                        flag = True
-                    elif msg["type"] == "voice":
-                        sql = f'SELECT Buf FROM Media WHERE Reserved0 = {msg["msgid"]}'
-                        dbresult = self.bot.QueryDatabase(db_handle=self.bot.GetDBHandle("MediaMSG0.db"), sql=sql)["data"]
-                        if len(dbresult) == 2:
-                            filebuffer = dbresult[1][0]
-                            decoded = bytes(base64.b64decode(filebuffer))
-                            with open(msg["filepath"], 'wb') as f:
-                                f.write(decoded)
-                            f.close()
+                                msg["filepath"] = ""
                             flag = True
+                        if full_image_exists and msg.get("wait_for_stable_media"):
+                            try:
+                                (
+                                    full_media_ready,
+                                    observed_size,
+                                    stable_since,
+                                ) = observe_media_file_size(
+                                    current_size=os.path.getsize(path),
+                                    previous_size=msg.get("_media_observed_size"),
+                                    stable_since=msg.get("_media_stable_since"),
+                                    now=time.monotonic(),
+                                )
+                                msg["_media_observed_size"] = observed_size
+                                msg["_media_stable_since"] = stable_since
+                            except OSError:
+                                full_media_ready = False
+                        thumbnail_exists = bool(
+                            thumb_path and media_path_state(thumb_path) == "ready"
+                        )
+                        elapsed_seconds = int(time.time()) - msg["timestamp"]
+                        timeout_seconds = media_wait_timeout(
+                            msg.get("historical_media", False)
+                        )
+                        if full_media_ready:
+                            flag = True
+                        elif should_use_thumbnail(
+                            full_image_exists,
+                            thumbnail_exists,
+                            elapsed_seconds,
+                            timeout_seconds,
+                        ):
+                            msg["filepath"] = thumb_path
+                            flag = True
+                        elif elapsed_seconds >= timeout_seconds:
+                            msg_type = msg["type"]
+                            if msg.get("historical_media", False):
+                                if self.historical_media_notice_sent:
+                                    should_send = False
+                                else:
+                                    msg["message"] = (
+                                        "[EFB 重启后检测到历史图片或语音附件已失效，"
+                                        "后续重复提示已自动省略，请在手机端查看]"
+                                    )
+                                    msg["type"] = "text"
+                                    self.historical_media_notice_sent = True
+                            else:
+                                msg['message'] = f"[{msg_type} 下载超时,请在手机端查看]"
+                                msg["type"] = "text"
+                            flag = True
+                        elif msg["type"] == "voice":
+                            sql = f'SELECT Buf FROM Media WHERE Reserved0 = {msg["msgid"]}'
+                            dbresult = self.bot.QueryDatabase(db_handle=self.bot.GetDBHandle("MediaMSG0.db"), sql=sql)["data"]
+                            if len(dbresult) == 2:
+                                filebuffer = dbresult[1][0]
+                                decoded = bytes(base64.b64decode(filebuffer))
+                                with open(msg["filepath"], 'wb') as f:
+                                    f.write(decoded)
+                                f.close()
+                                flag = True
 
-                    if flag:
-                        if not should_send:
-                            self.file_msg.pop(path, None)
-                            self.file_retry_at.pop(path, None)
-                            self.pending_file_store.remove(path)
-                            continue
-                        try:
-                            msg.pop("_media_observed_size", None)
-                            msg.pop("_media_stable_since", None)
-                            msg.pop("wait_for_stable_media", None)
-                            results = self.send_efb_msgs(
-                                MsgWrapper(msg, MsgProcess(msg, chat)),
-                                author=author,
-                                chat=chat,
-                                uid=MessageID(str(msg["msgid"])),
-                            )
-                            if not delivery_confirmed(results):
-                                raise EFBMessageError("Telegram 未返回投递确认")
-                        except Exception:
-                            self.file_retry_at[path] = time.time() + 30
-                            self.logger.exception(
-                                "文件投递未确认，30 秒后重试: msgid=%s path=%s",
-                                msg.get("msgid"),
-                                path,
-                            )
-                        else:
-                            self.file_msg.pop(path, None)
-                            self.file_retry_at.pop(path, None)
-                            self.pending_file_store.remove(path)
-                            status = (
-                                getattr(results[0], "vendor_specific", {})
-                                .get("telegram_delivery_status")
-                            )
-                            self.logger.info(
-                                "文件投递已确认: msgid=%s status=%s",
-                                msg.get("msgid"),
-                                status,
-                            )
+                        if flag:
+                            if not should_send:
+                                self.file_msg.pop(path, None)
+                                self.file_retry_at.pop(path, None)
+                                self.pending_file_store.remove(path)
+                                continue
+                            try:
+                                msg.pop("_media_observed_size", None)
+                                msg.pop("_media_stable_since", None)
+                                msg.pop("wait_for_stable_media", None)
+                                if not self.pending_file_store.begin_delivery(path):
+                                    msg["_delivery_attempt_started"] = True
+                                    continue
+                                msg["_delivery_attempt_started"] = True
+                                results = self.send_efb_msgs(
+                                    MsgWrapper(msg, MsgProcess(msg, chat)),
+                                    author=author,
+                                    chat=chat,
+                                    uid=MessageID(str(msg["msgid"])),
+                                )
+                                if not delivery_confirmed(results):
+                                    raise EFBMessageError("Telegram 未返回投递确认")
+                            except Exception:
+                                self.file_retry_at[path] = time.time() + 30
+                                self.delete_file.pop(path, None)
+                                self.logger.exception(
+                                    "文件投递未确认，已保留记录；已开始的发送需人工确认后重试: msgid=%s path=%s",
+                                    msg.get("msgid"),
+                                    path,
+                                )
+                            else:
+                                self.file_msg.pop(path, None)
+                                self.file_retry_at.pop(path, None)
+                                self.pending_file_store.remove(path)
+                                status = (
+                                    getattr(results[0], "vendor_specific", {})
+                                    .get("telegram_delivery_status")
+                                )
+                                self.logger.info(
+                                    "文件投递已确认: msgid=%s status=%s",
+                                    msg.get("msgid"),
+                                    status,
+                                )
+                    except Exception as error:
+                        self.file_retry_at[path] = time.time() + 30
+                        self.logger.warning("待发附件处理暂不可用，稍后复核 (%s)", type(error).__name__)
 
                 time.sleep(0.1)
 
