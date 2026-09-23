@@ -121,6 +121,8 @@ def test_pending_file_can_be_requested_for_immediate_delivery(tmp_path):
         )
     }
     channel.file_retry_at = {str(path): 100}
+    channel.pending_file_store = MODULE.PendingFileStore(tmp_path / "pending.json")
+    channel.pending_file_store.put(str(path), {"msg": channel.file_msg[str(path)][0]})
 
     assert channel.request_pending_file_delivery(str(path)) == "queued"
     assert channel.file_retry_at[str(path)] == 0
