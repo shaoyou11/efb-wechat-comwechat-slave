@@ -1364,6 +1364,7 @@ class ComWeChatChannel(SlaveChannel):
                     self.cache[msg["msgid"]] = msg["type"]
                     return
                 msg["type"] = "text"
+                msg["filepath"] = ""
                 msg["message"] = "[文件：" + attachment["name"] + "，附件路径不可用，请在微信端查看]"
             original_timestamp = msg.get("timestamp")
             force_original_historical = (

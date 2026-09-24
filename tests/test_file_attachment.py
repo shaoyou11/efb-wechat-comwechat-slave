@@ -32,3 +32,30 @@ def test_unsafe_paths(tmp_path, path):
 @pytest.mark.parametrize("xml", ["<msg><appmsg><type>5</type></appmsg></msg>", "broken", "<!DOCTYPE msg><msg/>"])
 def test_non_files(xml):
     assert file_attachment(xml) is None
+
+@pytest.mark.parametrize('layout', ['Files', 'FileStorage'])
+@pytest.mark.parametrize('absolute', [True, False])
+def test_queue_file_callbacks_once(tmp_path, layout, absolute):
+    import ast
+    import re
+    import time
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    source = (Path(__file__).parents[1] / 'efb_wechat_comwechat_slave/ComWechat.py').read_text()
+    node = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef) and n.name == 'handle_msg')
+    for arg in node.args.args:
+        arg.annotation = None
+    namespace = dict(re=re, time=time, file_attachment=file_attachment, attachment_path=attachment_path)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'callback', 'exec'), namespace)
+    worker = SimpleNamespace(cache={}, dir=str(tmp_path), queue_file_message=Mock(), logger=Mock())
+    relative = 'account/' + layout + '/file.zip'
+    path = str(tmp_path / relative) if absolute else relative
+    msg = {'type': 'share', 'message': '<msg><appmsg><type>6</type><title>file.zip</title><appattach><totallen>40000000</totallen></appattach></appmsg></msg>', 'filepath': path.replace('/', chr(92)), 'msgid': 'one'}
+    namespace['handle_msg'](worker, msg, SimpleNamespace(uid='author'), SimpleNamespace(uid='chat'))
+    worker.queue_file_message.assert_called_once()
+    assert worker.queue_file_message.call_args[0][0] == str(tmp_path / relative)
+    assert msg['_expected_file_size'] == 40000000
+    assert msg['wait_for_stable_media'] is True
+    namespace['handle_msg'](worker, msg, None, SimpleNamespace(uid='chat'))
+    worker.queue_file_message.assert_called_once()
