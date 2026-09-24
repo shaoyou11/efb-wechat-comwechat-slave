@@ -1,3 +1,4 @@
+from .file_attachment import file_attachment, attachment_path
 from typing import Union, List
 import base64
 import tempfile
@@ -79,6 +80,13 @@ def MsgProcess(msg : dict , chat) -> Union[Message, List[Message]]:
             return efb_text_simple_wrapper("Image received and download failed. Please check it on your phone.")
 
     elif msg["type"] == "share":
+        attachment = file_attachment(msg.get("message"))
+        if attachment is not None:
+            try:
+                file = open(msg.get("filepath") or "", "rb")
+            except (OSError, ValueError):
+                return efb_text_simple_wrapper("[文件：" + attachment["name"] + "，附件暂不可用，请在微信端查看]")
+            return efb_file_wrapper(file, attachment["name"])
         if ("FileStorage" in msg["filepath"]) and ("Cache" not in msg["filepath"]):
             file = open(msg["filepath"], "rb")
             return efb_file_wrapper(file, os.path.basename(msg["filepath"]))

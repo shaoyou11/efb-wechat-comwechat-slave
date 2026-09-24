@@ -1,3 +1,4 @@
+from .file_attachment import file_attachment, attachment_path
 from .client_recovery import ClientRecoveryPaused, recover_for_login
 import logging, tempfile
 import queue
@@ -1350,6 +1351,21 @@ class ComWeChatChannel(SlaveChannel):
             return
 
         try:
+            attachment = file_attachment(msg.get("message")) if msg.get("type") == "share" else None
+            if attachment is not None:
+                path = attachment_path(msg.get("filepath"), self.dir)
+                if path:
+                    msg["filepath"] = path
+                    msg["timestamp"] = int(time.time())
+                    msg["historical_media"] = False
+                    msg["wait_for_stable_media"] = True
+                    msg["_expected_file_size"] = attachment["size"]
+                    self.queue_file_message(path, msg, author, chat)
+                    self.cache[msg["msgid"]] = msg["type"]
+                    return
+                msg["type"] = "text"
+                msg["filepath"] = ""
+                msg["message"] = "[文件：" + attachment["name"] + "，附件路径不可用，请在微信端查看]"
             original_timestamp = msg.get("timestamp")
             force_original_historical = (
                 self.config.get("force_original_media_download", True)
@@ -1499,6 +1515,11 @@ class ComWeChatChannel(SlaveChannel):
                                 )
                                 msg["_media_observed_size"] = observed_size
                                 msg["_media_stable_since"] = stable_since
+                            except OSError:
+                                full_media_ready = False
+                        if full_media_ready and msg.get("_expected_file_size", 0) > 0:
+                            try:
+                                full_media_ready = os.path.getsize(path) == msg["_expected_file_size"]
                             except OSError:
                                 full_media_ready = False
                         thumbnail_exists = bool(
